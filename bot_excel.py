@@ -13,7 +13,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 CUOTA_PISO_BETANO = 1.70
 PROBABILIDAD_MINIMA_FILTRO = 88.0
 MAX_ALERTAS_POR_JORNADA = 3
-MAX_PASOS_BETBUILDER = 3  # <--- LÍMITE STRICTO DE SELECCIONES POR BETBUILDER
+MAX_PASOS_BETBUILDER = 3  # Límite estricto de selecciones por BetBuilder
 
 
 # ==========================================
@@ -41,7 +41,7 @@ def buscar_event_id_sofascore(local, visitante):
                 if res.get("type") == "event":
                     entity = res.get("entity", {})
                     event_id = entity.get("id")
-                    print(f"[SOFASCORE] Event_ID encontrado automáticamente ({query}): {event_id}")
+                    print(f"[SOFASCORE] Event_ID encontrado ({query}): {event_id}")
                     return event_id
         print(f"[SOFASCORE] No se encontró Event_ID automático para: {query}")
         return None
@@ -53,7 +53,7 @@ def buscar_event_id_sofascore(local, visitante):
 def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
     """
     Consulta las alineaciones oficiales de Sofascore usando el Event_ID automático.
-    Retorna True solo si las alineaciones son oficiales Y los jugadores clave son titulares confirmados.
+    Retorna True solo si las alineaciones son oficiales Y los jugadores clave son titulares.
     """
     if not jugadores_objetivo:
         return True, "SIN_JUGADORES_QUE_VALIDAR"
@@ -77,25 +77,31 @@ def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
 
         data = r.json()
         
-        # AJUSTE ESTRICTO: Si la alineación aún no es oficial, NO se envía la apuesta.
-        # Esperará a la siguiente ejecución de los 20 minutos.
+        # Si la alineación aún no es oficial, NO se envía la apuesta.
         if not data.get("confirmed", False):
-            print(f"[SOFASCORE] Alineación aún no confirmada para {local} vs {visitante}. Se aguarda a la siguiente corrida de 20 min.")
+            print(f"[SOFASCORE] Alineación aún no confirmada para {local} vs {visitante}. Se aguarda a la siguiente ejecución.")
             return False, "ESPERANDO_ALINEACION_OFICIAL"
 
-        # Extraer lista de 11 titulares
+        # Extraer lista de titulares
         titulares = []
         for equipo in ["home", "away"]:
             for p in data.get(equipo, {}).get("players", []):
                 if not p.get("substitute", True):
                     titulares.append(p["player"]["name"].lower())
 
-        # Validar si los jugadores del Excel son titulares
+        # Validar si los jugadores del Excel son titulares (Búsqueda por coincidencia parcial de palabras)
         for jugador in jugadores_objetivo:
             jugador_norm = jugador.lower().strip()
-            es_titular = any(jugador_norm in t or t in jugador_norm for t in titulares)
+            palabras_jugador = jugador_norm.split()
+            
+            # Revisa si al menos un apellido/nombre coincide con el listado de titulares
+            es_titular = any(
+                any(p in t for p in palabras_jugador if len(p) > 2)
+                for t in titulares
+            )
+            
             if not es_titular:
-                print(f"[ALERTA DE BANCA] {jugador} NO es titular en Sofascore.")
+                print(f"[ALERTA DE BANCA] {jugador} NO figura como titular en Sofascore.")
                 return False, f"JUGADOR_SUPLENTE: {jugador}"
 
         print(f"[SOFASCORE OK] Jugadores validados como TITULARES: {jugadores_objetivo}")
@@ -107,7 +113,7 @@ def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
 
 
 # ==========================================
-# FUNCIONES ORIGINALES DE TELEGRAM Y PROMEDIOS
+# FUNCIONES AUXILIARES Y TELEGRAM
 # ==========================================
 def enviar_telegram(mensaje):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -187,13 +193,12 @@ def analizar_excel():
         prom_goles_L = calcular_promedio(goles_L)
         prom_goles_V = calcular_promedio(goles_V)
         prom_remates_L = calcular_promedio(remates_L)
-        prom_remates_V = calcular_promedio(remates_V)
         prom_corners_L = calcular_promedio(corners_L)
         prom_corners_V = calcular_promedio(corners_V)
 
         # EVALUACIÓN DE TODAS LAS FAMILIAS
         familias_seleccionadas = []
-        jugadores_a_validar = []  # Almacena jugadores para verificación en Sofascore
+        jugadores_a_validar = []
 
         # FAMILIA 1: RESULTADO FINAL (1X2)
         if prom_goles_L >= 2.3 and prom_goles_V <= 0.7:
@@ -223,7 +228,7 @@ def analizar_excel():
                 "score": 88.5
             })
 
-        # FAMILIA 4: CÓRNERS (TOTALES O POR EQUIPO)
+        # FAMILIA 4: CÓRNERS
         if (prom_corners_L + prom_corners_V) >= 8.5:
             familias_seleccionadas.append({
                 "familia": "Córners",
@@ -250,7 +255,7 @@ def analizar_excel():
 
         # FAMILIAS 6 Y 7: JUGADORES
         if not df_jugadores.empty:
-            jugadores_partido = df_jugadores[df_jugadores["Equipo"].isin([local, visita])]
+            jugadores_partido = df_jugadores[df_jugadores["Equipo"].isin([local, visita])].copy()
             
             if "Remates al Arco" in jugadores_partido.columns:
                 rematadores = jugadores_partido[jugadores_partido["Remates al Arco"] >= 2]
@@ -267,7 +272,9 @@ def analizar_excel():
             if "Goles" in jugadores_partido.columns or "Asistencias" in jugadores_partido.columns:
                 goles_col = jugadores_partido.get("Goles", 0)
                 asist_col = jugadores_partido.get("Asistencias", 0)
-                jugadores_partido["Participacion"] = goles_col + asist_col
+                
+                # Corrección de asignación directa sobre copia
+                jugadores_partido.loc[:, "Participacion"] = goles_col + asist_col
                 
                 goleadores = jugadores_partido[jugadores_partido["Participacion"] >= 2]
                 if not goleadores.empty:
@@ -280,19 +287,18 @@ def analizar_excel():
                     })
                     jugadores_a_validar.append(str(top_g['Jugador']))
 
-        # -----------------------------------------------------------------
+        # Limpiar lista de jugadores a validar (elimina duplicados)
+        jugadores_a_validar = list(set(jugadores_a_validar))
+
         # VERIFICACIÓN EN SOFASCORE ANTES DE CREAR LA PROPUESTA
-        # -----------------------------------------------------------------
         es_valido, motivo = validar_titulares_sofascore(local, visita, jugadores_a_validar)
         if not es_valido:
-            print(f"[OMITIDO] Se descarta temporal o definitivamente el partido {local} vs {visita} por motivo: {motivo}")
+            print(f"[OMITIDO] Se descarta el partido {local} vs {visita} por motivo: {motivo}")
             continue
 
         jornada_txt = int(jornada) if pd.notna(jornada) and isinstance(jornada, (int, float)) else str(jornada)
 
-        # -----------------------------------------------------------------
-        # CORRECCIÓN DE REGLA: MÁXIMO 3 PASOS POR BETBUILDER
-        # -----------------------------------------------------------------
+        # MÁXIMO 3 PASOS POR BETBUILDER
         if len(familias_seleccionadas) >= 2:
             familias_seleccionadas.sort(key=lambda x: x["score"], reverse=True)
             picks_finales = familias_seleccionadas[:MAX_PASOS_BETBUILDER]
