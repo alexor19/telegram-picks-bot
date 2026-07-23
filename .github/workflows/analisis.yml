@@ -32,16 +32,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python bot_excel.py
 
-      - name: Guardar Historial de Alertas
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -f alertas_enviadas.txt ]; then
-            git add alertas_enviadas.txt
-            git commit -m "Auto-update: guardar historial de alertas enviadas" || echo "Sin cambios para guardar"
-            git push
-          fi
-      - name: Guardar historial de alertas enviadas
+      - name: Guardar Historial de Alertas Enviadas
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
