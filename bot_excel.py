@@ -1,8 +1,11 @@
 import os
 import glob
+import re
+import unicodedata
 import pandas as pd
 import requests
 import urllib.parse
+from thefuzz import fuzz
 
 # ==========================================
 # CONFIGURACIÓN Y PARÁMETROS
@@ -13,22 +16,75 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 CUOTA_PISO_BETANO = 1.70
 PROBABILIDAD_MINIMA_FILTRO = 88.0
 MAX_ALERTAS_POR_JORNADA = 3
-MAX_PASOS_BETBUILDER = 3  # Límite estricto de selecciones por BetBuilder
+MAX_PASOS_BETBUILDER = 3
+ARCHIVO_HISTORIAL = "alertas_enviadas.txt"
+
+
+# ==========================================
+# MÓDULO: MEMORIA DE ALERTAS (HISTORIAL)
+# ==========================================
+def cargar_historial():
+    """Carga las alertas enviadas previamente para no repetir mensajes."""
+    if os.path.exists(ARCHIVO_HISTORIAL):
+        with open(ARCHIVO_HISTORIAL, "r", encoding="utf-8") as f:
+            return set(linea.strip() for linea in f if linea.strip())
+    return set()
+
+def registrar_alerta(alerta_id):
+    """Guarda el ID de la alerta en el archivo de texto."""
+    with open(ARCHIVO_HISTORIAL, "a", encoding="utf-8") as f:
+        f.write(f"{alerta_id}\n")
+
+
+# ==========================================
+# MÓDULO: LÓGICA DIFUSA Y NORMALIZACIÓN (FUZZY)
+# ==========================================
+def normalizar_texto(texto):
+    if not texto:
+        return ""
+    texto = str(texto).lower()
+    texto = unicodedata.normalize('NFD', texto).encode('ascii', 'ignore').decode("utf-8")
+    palabras_basura = [r'\bfc\b', r'\bcf\b', r'\bcd\b', r'\bclub\b', r'\bsd\b', r'\bud\b', r'\bafc\b']
+    for p in palabras_basura:
+        texto = re.sub(p, '', texto)
+    texto = re.sub(r'[^a-z0-9\s]', '', texto)
+    return texto.strip()
+
+def son_mismo_equipo(equipo_excel, equipo_sofascore, umbral=70):
+    e1 = normalizar_texto(equipo_excel)
+    e2 = normalizar_texto(equipo_sofascore)
+    if e1 in e2 or e2 in e1:
+        return True
+    return fuzz.token_set_ratio(e1, e2) >= umbral
+
+def es_mismo_jugador(nombre_excel, nombre_sofascore, umbral=75):
+    j1 = normalizar_texto(nombre_excel)
+    j2 = normalizar_texto(nombre_sofascore)
+    
+    if j1 == j2 or j1 in j2 or j2 in j1:
+        return True
+        
+    if fuzz.token_set_ratio(j1, j2) >= umbral:
+        return True
+        
+    partes_j1 = j1.split()
+    partes_j2 = j2.split()
+    if partes_j1 and partes_j2:
+        if partes_j1[-1] == partes_j2[-1] and len(partes_j1[-1]) > 3:
+            return True
+    return False
 
 
 # ==========================================
 # MÓDULO: BÚSQUEDA Y VALIDACIÓN EN SOFASCORE
 # ==========================================
 def buscar_event_id_sofascore(local, visitante):
-    """
-    Busca automáticamente el partido en Sofascore usando los nombres del Excel.
-    """
-    query = f"{local} vs {visitante}"
+    query = f"{local} {visitante}"
     query_encoded = urllib.parse.quote(query)
     
     url = f"https://api.sofascore.com/api/v3/search/all?q={query_encoded}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Referer": "https://www.sofascore.com/",
         "Accept": "application/json"
     }
@@ -40,32 +96,31 @@ def buscar_event_id_sofascore(local, visitante):
             for res in resultados:
                 if res.get("type") == "event":
                     entity = res.get("entity", {})
-                    event_id = entity.get("id")
-                    print(f"[SOFASCORE] Event_ID encontrado ({query}): {event_id}")
-                    return event_id
-        print(f"[SOFASCORE] No se encontró Event_ID automático para: {query}")
+                    home_team = entity.get("homeTeam", {}).get("name", "")
+                    away_team = entity.get("awayTeam", {}).get("name", "")
+                    
+                    if son_mismo_equipo(local, home_team) and son_mismo_equipo(visitante, away_team):
+                        event_id = entity.get("id")
+                        print(f"[SOFASCORE OK] Coincidencia: {home_team} vs {away_team} (ID: {event_id})")
+                        return event_id
+        print(f"[SOFASCORE WARN] No se encontró Event_ID para: {local} vs {visitante}")
         return None
     except Exception as e:
-        print(f"[EXCEPCIÓN BÚSQUEDA SOFASCORE] {e}")
+        print(f"[EXCEPCIÓN SOFASCORE] {e}")
         return None
 
-
 def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
-    """
-    Consulta las alineaciones oficiales de Sofascore usando el Event_ID automático.
-    Retorna True solo si las alineaciones son oficiales Y los jugadores clave son titulares.
-    """
     if not jugadores_objetivo:
         return True, "SIN_JUGADORES_QUE_VALIDAR"
 
     event_id = buscar_event_id_sofascore(local, visitante)
     if not event_id:
-        print(f"[SOFASCORE WARN] No se pudo obtener ID para {local} vs {visitante}. Se omite filtro de plantilla.")
+        print(f"[SOFASCORE WARN] Sin ID para {local} vs {visitante}. Omitiendo filtro de plantilla.")
         return True, "ID_NO_ENCONTRADO_OMITIDO"
 
     url_lineups = f"https://api.sofascore.com/api/v3/event/{event_id}/lineups"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Referer": "https://www.sofascore.com/",
         "Accept": "application/json"
     }
@@ -76,44 +131,32 @@ def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
             return True, "ERROR_CONEXION_OMITIDO"
 
         data = r.json()
-        
-        # Si la alineación aún no es oficial, NO se envía la apuesta.
         if not data.get("confirmed", False):
-            print(f"[SOFASCORE] Alineación aún no confirmada para {local} vs {visitante}. Se aguarda a la siguiente ejecución.")
+            print(f"[SOFASCORE] Alineación aún no confirmada para {local} vs {visitante}.")
             return False, "ESPERANDO_ALINEACION_OFICIAL"
 
-        # Extraer lista de titulares
         titulares = []
         for equipo in ["home", "away"]:
             for p in data.get(equipo, {}).get("players", []):
                 if not p.get("substitute", True):
-                    titulares.append(p["player"]["name"].lower())
+                    titulares.append(p["player"]["name"])
 
-        # Validar si los jugadores del Excel son titulares (Búsqueda por coincidencia parcial de palabras)
         for jugador in jugadores_objetivo:
-            jugador_norm = jugador.lower().strip()
-            palabras_jugador = jugador_norm.split()
-            
-            # Revisa si al menos un apellido/nombre coincide con el listado de titulares
-            es_titular = any(
-                any(p in t for p in palabras_jugador if len(p) > 2)
-                for t in titulares
-            )
-            
+            es_titular = any(es_mismo_jugador(jugador, t) for t in titulares)
             if not es_titular:
-                print(f"[ALERTA DE BANCA] {jugador} NO figura como titular en Sofascore.")
+                print(f"[ALERTA DE BANCA] {jugador} NO es titular en Sofascore.")
                 return False, f"JUGADOR_SUPLENTE: {jugador}"
 
-        print(f"[SOFASCORE OK] Jugadores validados como TITULARES: {jugadores_objetivo}")
+        print(f"[SOFASCORE OK] Jugadores confirmados como TITULARES: {jugadores_objetivo}")
         return True, "TITULARES_CONFIRMADOS"
 
     except Exception as e:
-        print(f"[EXCEPCIÓN LINEUPS SOFASCORE] {e}")
+        print(f"[EXCEPCIÓN LINEUPS] {e}")
         return True, "EXCEPCION_OMITIDA"
 
 
 # ==========================================
-# FUNCIONES AUXILIARES Y TELEGRAM
+# FUNCIONES PRINCIPALES Y TELEGRAM
 # ==========================================
 def enviar_telegram(mensaje):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -140,7 +183,9 @@ def calcular_promedio(lista):
     return sum(validos) / len(validos) if validos else 0.0
 
 def analizar_excel():
+    historial = cargar_historial()
     archivos = glob.glob("*.xlsx")
+    
     if not archivos:
         print("[ERROR] No se encontró ningún archivo .xlsx.")
         return
@@ -164,7 +209,7 @@ def analizar_excel():
     partidos_pendientes = df_partidos[df_partidos["Goles L"].isna()].copy()
 
     if partidos_pendientes.empty:
-        enviar_telegram("ℹ️ *[REPORTE EXCEL]*\nNo hay partidos pendientes en el archivo Excel.")
+        print("[INFO] No hay partidos pendientes en el Excel.")
         return
 
     todas_las_propuestas = []
@@ -173,6 +218,14 @@ def analizar_excel():
         local = str(fila["Local"]).strip()
         visita = str(fila["Visitante"]).strip()
         jornada = fila.get("Jornada", "N/A")
+        jornada_txt = int(jornada) if pd.notna(jornada) and isinstance(jornada, (int, float)) else str(jornada)
+
+        # GENERAR ID ÚNICO PARA REVISAR EN HISTORIAL
+        alerta_id = f"J{jornada_txt}_{normalizar_texto(local)}_vs_{normalizar_texto(visita)}"
+        
+        if alerta_id in historial:
+            print(f"[OMITIDO] El partido {local} vs {visita} ya fue notificado previamente.")
+            continue
 
         hist_local = partidos_jugados[(partidos_jugados["Local"] == local) | (partidos_jugados["Visitante"] == local)].tail(3)
         hist_visita = partidos_jugados[(partidos_jugados["Local"] == visita) | (partidos_jugados["Visitante"] == visita)].tail(3)
@@ -183,10 +236,8 @@ def analizar_excel():
         # Promedios
         goles_L = [p["Goles L"] if p["Local"] == local else p["Goles V"] for _, p in hist_local.iterrows()]
         goles_V = [p["Goles L"] if p["Local"] == visita else p["Goles V"] for _, p in hist_visita.iterrows()]
-        
         remates_L = [p.get("Remates Arco L", 0) if p["Local"] == local else p.get("Remates Arco V", 0) for _, p in hist_local.iterrows()]
         remates_V = [p.get("Remates Arco L", 0) if p["Local"] == visita else p.get("Remates Arco V", 0) for _, p in hist_visita.iterrows()]
-
         corners_L = [p.get("Corners L", 0) if p["Local"] == local else p.get("Corners V", 0) for _, p in hist_local.iterrows()]
         corners_V = [p.get("Corners L", 0) if p["Local"] == visita else p.get("Corners V", 0) for _, p in hist_visita.iterrows()]
 
@@ -196,11 +247,10 @@ def analizar_excel():
         prom_corners_L = calcular_promedio(corners_L)
         prom_corners_V = calcular_promedio(corners_V)
 
-        # EVALUACIÓN DE TODAS LAS FAMILIAS
         familias_seleccionadas = []
         jugadores_a_validar = []
 
-        # FAMILIA 1: RESULTADO FINAL (1X2)
+        # FAMILIA 1: 1X2
         if prom_goles_L >= 2.3 and prom_goles_V <= 0.7:
             familias_seleccionadas.append({
                 "familia": "Resultado Final",
@@ -209,7 +259,7 @@ def analizar_excel():
                 "score": 89.5
             })
 
-        # FAMILIA 2: GOLES TOTALES DEL PARTIDO
+        # FAMILIA 2: GOLES TOTALES
         if (prom_goles_L + prom_goles_V) >= 2.2:
             familias_seleccionadas.append({
                 "familia": "Goles Totales",
@@ -218,7 +268,7 @@ def analizar_excel():
                 "score": 90.0
             })
 
-        # FAMILIA 3: GOLES POR EQUIPO
+        # FAMILIA 3: GOLES EQUIPO
         tiene_1x2 = any(item["familia"] == "Resultado Final" for item in familias_seleccionadas)
         if not tiene_1x2 and prom_goles_L >= 1.5:
             familias_seleccionadas.append({
@@ -244,7 +294,7 @@ def analizar_excel():
                 "score": 88.0
             })
 
-        # FAMILIA 5: REMATES AL ARCO POR EQUIPO
+        # FAMILIA 5: REMATES EQUIPO
         if prom_remates_L >= 4.5:
             familias_seleccionadas.append({
                 "familia": "Remates Equipo",
@@ -272,8 +322,6 @@ def analizar_excel():
             if "Goles" in jugadores_partido.columns or "Asistencias" in jugadores_partido.columns:
                 goles_col = jugadores_partido.get("Goles", 0)
                 asist_col = jugadores_partido.get("Asistencias", 0)
-                
-                # Corrección de asignación directa sobre copia
                 jugadores_partido.loc[:, "Participacion"] = goles_col + asist_col
                 
                 goleadores = jugadores_partido[jugadores_partido["Participacion"] >= 2]
@@ -287,24 +335,20 @@ def analizar_excel():
                     })
                     jugadores_a_validar.append(str(top_g['Jugador']))
 
-        # Limpiar lista de jugadores a validar (elimina duplicados)
         jugadores_a_validar = list(set(jugadores_a_validar))
 
-        # VERIFICACIÓN EN SOFASCORE ANTES DE CREAR LA PROPUESTA
+        # VALIDACIÓN EN SOFASCORE
         es_valido, motivo = validar_titulares_sofascore(local, visita, jugadores_a_validar)
         if not es_valido:
-            print(f"[OMITIDO] Se descarta el partido {local} vs {visita} por motivo: {motivo}")
+            print(f"[OMITIDO] Se descarta {local} vs {visita} por: {motivo}")
             continue
 
-        jornada_txt = int(jornada) if pd.notna(jornada) and isinstance(jornada, (int, float)) else str(jornada)
-
-        # MÁXIMO 3 PASOS POR BETBUILDER
         if len(familias_seleccionadas) >= 2:
             familias_seleccionadas.sort(key=lambda x: x["score"], reverse=True)
             picks_finales = familias_seleccionadas[:MAX_PASOS_BETBUILDER]
-            
             score_promedio = sum(c['score'] for c in picks_finales) / len(picks_finales)
             todas_las_propuestas.append({
+                "alerta_id": alerta_id,
                 "tipo": "BETBUILDER",
                 "partido": f"{local} vs. {visita}",
                 "jornada": jornada_txt,
@@ -315,6 +359,7 @@ def analizar_excel():
         elif len(familias_seleccionadas) == 1:
             pick = familias_seleccionadas[0]
             todas_las_propuestas.append({
+                "alerta_id": alerta_id,
                 "tipo": "SIMPLE",
                 "partido": f"{local} vs. {visita}",
                 "jornada": jornada_txt,
@@ -330,7 +375,7 @@ def analizar_excel():
     top_selecciones = propuestas_filtradas[:MAX_ALERTAS_POR_JORNADA]
 
     if not top_selecciones:
-        print("[INFO] No hay propuestas listas con alineación confirmada en esta ejecución.")
+        print("[INFO] No hay propuestas nuevas para notificar.")
         return
 
     for propuesta in top_selecciones:
@@ -366,6 +411,7 @@ def analizar_excel():
                 f"🛡️ *Perfil:* Value Bettor Conservador-Activo"
             )
         enviar_telegram(mensaje)
+        registrar_alerta(propuesta["alerta_id"])
 
 if __name__ == "__main__":
     analizar_excel()
