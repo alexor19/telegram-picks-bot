@@ -2,6 +2,7 @@ import os
 import glob
 import pandas as pd
 import requests
+import urllib.parse
 
 # ==========================================
 # CONFIGURACIÓN Y PARÁMETROS
@@ -14,6 +15,100 @@ PROBABILIDAD_MINIMA_FILTRO = 88.0
 MAX_ALERTAS_POR_JORNADA = 3
 MAX_PASOS_BETBUILDER = 3  # <--- LÍMITE STRICTO DE SELECCIONES POR BETBUILDER
 
+
+# ==========================================
+# MÓDULO NUEVO: BÚSQUEDA Y VALIDACIÓN EN SOFASCORE (SOLUCIÓN 1)
+# ==========================================
+def buscar_event_id_sofascore(local, visitante):
+    """
+    Busca automáticamente el partido en Sofascore usando los nombres del Excel.
+    """
+    query = f"{local} vs {visitante}"
+    query_encoded = urllib.parse.quote(query)
+    
+    url = f"https://api.sofascore.com/api/v3/search/all?q={query_encoded}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://www.sofascore.com/",
+        "Accept": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            resultados = response.json().get("results", [])
+            for res in resultados:
+                if res.get("type") == "event":
+                    entity = res.get("entity", {})
+                    event_id = entity.get("id")
+                    print(f"[SOFASCORE] Event_ID encontrado automáticamente ({query}): {event_id}")
+                    return event_id
+        print(f"[SOFASCORE] No se encontró Event_ID automático para: {query}")
+        return None
+    except Exception as e:
+        print(f"[EXCEPCIÓN BÚSQUEDA SOFASCORE] {e}")
+        return None
+
+
+def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
+    """
+    Consulta las alineaciones oficiales de Sofascore usando el Event_ID automático.
+    Retorna True si los jugadores clave son titulares confirmados.
+    """
+    if not jugadores_objetivo:
+        return True, "SIN_JUGADORES_QUE_VALIDAR"
+
+    event_id = buscar_event_id_sofascore(local, visitante)
+    if not event_id:
+        # Si no se encuentra el ID por coincidencia, se permite continuar advirtiendo en logs
+        print(f"[SOFASCORE WARN] No se pudo obtener ID para {local} vs {visitante}. Se omite filtro de plantilla.")
+        return True, "ID_NO_ENCONTRADO_OMITIDO"
+
+    url_lineups = f"https://api.sofascore.com/api/v3/event/{event_id}/lineups"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://www.sofascore.com/",
+        "Accept": "application/json"
+    }
+
+    try:
+        r = requests.get(url_lineups, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return True, "ERROR_CONEXION_OMITIDO"
+
+        data = r.json()
+        
+        # Si la alineación aún no es oficial, se notifica
+        if not data.get("confirmed", False):
+            print(f"[SOFASCORE] Alineación aún no confirmada para {local} vs {visitante}.")
+            return False, "ALINEACION_NO_OFICIAL"
+
+        # Extraer lista de 11 titulares
+        titulares = []
+        for equipo in ["home", "away"]:
+            for p in data.get(equipo, {}).get("players", []):
+                if not p.get("substitute", True):
+                    titulares.append(p["player"]["name"].lower())
+
+        # Validar si los jugadores del Excel son titulares
+        for jugador in jugadores_objetivo:
+            jugador_norm = jugador.lower().strip()
+            es_titular = any(jugador_norm in t or t in jugador_norm for t in titulares)
+            if not es_titular:
+                print(f"[ALERTA DE BANCA] {jugador} NO es titular en Sofascore.")
+                return False, f"JUGADOR_SUPLENTE: {jugador}"
+
+        print(f"[SOFASCORE OK] Jugadores validados como TITULARES: {jugadores_objetivo}")
+        return True, "TITULARES_CONFIRMADOS"
+
+    except Exception as e:
+        print(f"[EXCEPCIÓN LINEUPS SOFASCORE] {e}")
+        return True, "EXCEPCION_OMITIDA"
+
+
+# ==========================================
+# FUNCIONES ORIGINALES
+# ==========================================
 def enviar_telegram(mensaje):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("[ERROR] Faltan credenciales de Telegram.")
@@ -98,6 +193,7 @@ def analizar_excel():
 
         # EVALUACIÓN DE TODAS LAS FAMILIAS
         familias_seleccionadas = []
+        jugadores_a_validar = []  # <--- Almacena jugadores para verificación en Sofascore
 
         # FAMILIA 1: RESULTADO FINAL (1X2)
         if prom_goles_L >= 2.3 and prom_goles_V <= 0.7:
@@ -166,6 +262,7 @@ def analizar_excel():
                         "razon": f"Registra {int(top_r['Remates al Arco'])} tiros directos en sus apariciones",
                         "score": 91.0
                     })
+                    jugadores_a_validar.append(str(top_r['Jugador']))
 
             if "Goles" in jugadores_partido.columns or "Asistencias" in jugadores_partido.columns:
                 goles_col = jugadores_partido.get("Goles", 0)
@@ -181,6 +278,15 @@ def analizar_excel():
                         "razon": f"Suma {int(top_g['Participacion'])} participaciones directas de gol",
                         "score": 89.0
                     })
+                    jugadores_a_validar.append(str(top_g['Jugador']))
+
+        # -----------------------------------------------------------------
+        # VERIFICACIÓN EN SOFASCORE ANTES DE CREAR LA PROPUESTA (SOLUCIÓN 1)
+        # -----------------------------------------------------------------
+        es_valido, motivo = validar_titulares_sofascore(local, visita, jugadores_a_validar)
+        if not es_valido:
+            print(f"[OMITIDO] Se descarta el partido {local} vs {visita} por motivo: {motivo}")
+            continue
 
         jornada_txt = int(jornada) if pd.notna(jornada) and isinstance(jornada, (int, float)) else str(jornada)
 
