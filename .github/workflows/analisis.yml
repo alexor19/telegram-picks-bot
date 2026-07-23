@@ -1,10 +1,13 @@
 name: Analisis Cuantitativo Excel
 
 on:
+  schedule:
+    # Se ejecuta automáticamente cada 20 minutos
+    - cron: '*/20 * * * *'
   push:
     paths:
-      - '**.xlsx'  # Se ejecuta automáticamente cada vez que subes o modificas un Excel
-  workflow_dispatch:  # Permite presionar un botón manual "Run workflow" en GitHub cuando quieras
+      - '**.xlsx'  # Se ejecuta automáticamente al subir o modificar un Excel
+  workflow_dispatch:  # Permite ejecutarlo manualmente con el botón "Run workflow"
 
 jobs:
   analizar:
