@@ -4,3 +4,4 @@ J2_tijuana_vs_leon
 J2_tigres uanl_vs_atletico de san luis
 J2_necaxa_vs_monterrey
 J2_santos laguna_vs_atlas
+J2_guadalajara_vs_juarez
