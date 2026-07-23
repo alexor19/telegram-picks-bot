@@ -197,7 +197,7 @@ def analizar_excel():
         xls = pd.ExcelFile(excel_path)
         df_partidos = pd.read_excel(xls, sheet_name="Partidos")
         
-        df_jugadores = pd.DataFrame()
+        df_jugadores = pd.DataFrame(columns=["Jugador", "Equipo", "Remates al Arco", "Goles", "Asistencias"])
         if "Estadísticas Jugadores" in xls.sheet_names:
             df_jugadores = pd.read_excel(xls, sheet_name="Estadísticas Jugadores")
     except Exception as e:
@@ -304,10 +304,10 @@ def analizar_excel():
             })
 
         # FAMILIAS 6 Y 7: JUGADORES
-        if not df_jugadores.empty:
+        if not df_jugadores.empty and "Equipo" in df_jugadores.columns:
             jugadores_partido = df_jugadores[df_jugadores["Equipo"].isin([local, visita])].copy()
             
-            if "Remates al Arco" in jugadores_partido.columns:
+            if "Remates al Arco" in jugadores_partido.columns and not jugadores_partido.empty:
                 rematadores = jugadores_partido[jugadores_partido["Remates al Arco"] >= 2]
                 if not rematadores.empty:
                     top_r = rematadores.sort_values(by="Remates al Arco", ascending=False).iloc[0]
@@ -319,10 +319,10 @@ def analizar_excel():
                     })
                     jugadores_a_validar.append(str(top_r['Jugador']))
 
-            if "Goles" in jugadores_partido.columns or "Asistencias" in jugadores_partido.columns:
-                goles_col = jugadores_partido.get("Goles", 0)
-                asist_col = jugadores_partido.get("Asistencias", 0)
-                jugadores_partido.loc[:, "Participacion"] = goles_col + asist_col
+            if not jugadores_partido.empty:
+                goles_col = jugadores_partido["Goles"].fillna(0) if "Goles" in jugadores_partido.columns else 0
+                asist_col = jugadores_partido["Asistencias"].fillna(0) if "Asistencias" in jugadores_partido.columns else 0
+                jugadores_partido["Participacion"] = goles_col + asist_col
                 
                 goleadores = jugadores_partido[jugadores_partido["Participacion"] >= 2]
                 if not goleadores.empty:
@@ -403,7 +403,7 @@ def analizar_excel():
                 f"🏟️ *Partido:* {propuesta['partido']}\n"
                 f"───────────────────────────\n"
                 f"📌 *Mercado:* {pick['familia']}\n"
-                f"👉 **{pick['texto']}**\n"
+                f"👉 *{pick['texto']}*\n"
                 f"───────────────────────────\n"
                 f"📊 *Sustento Estadístico:* {pick['razon']}\n"
                 f"🔥 *Nivel de Confianza:* {propuesta['score']:.1f}%\n"
