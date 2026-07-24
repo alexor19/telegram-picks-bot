@@ -28,7 +28,7 @@ ZONA_HORARIA_LIMA = pytz.timezone("America/Lima")
 # MÓDULO: FECHA Y HORA DEL PARTIDO
 # ==========================================
 def obtener_fecha_hora_partido(event_id):
-    """Obtiene la fecha y hora oficial del partido desde la API de Sofascore convertida a la hora de Lima, Perú."""
+    """Obtiene la fecha y hora oficial del partido desde la API de Sofascore."""
     url = f"https://api.sofascore.com/api/v3/event/{event_id}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -53,62 +53,69 @@ def obtener_fecha_hora_partido(event_id):
 
 
 # ==========================================
-# MÓDULO: CONSULTA REAL DE CUOTAS (BETANO PERÚ)
+# MÓDULO: EXTRACCIÓN DE CUOTAS DESDE SOFASCORE
 # ==========================================
-def obtener_cuota_real_betano(local, visitante, tipo_mercado):
+def obtener_cuota_real_sofascore(event_id, tipo_mercado):
     """
-    Busca de forma dinámica en el motor de búsqueda y mercados de Betano Perú 
-    la cuota real exacta correspondiente al evento y al mercado analizado.
+    Consulta las cuotas de mercado directamente desde los proveedores integrados en Sofascore 
+    para el event_id correspondiente. Retorna la cuota exacta o None si no está disponible.
     """
-    query = f"{local} {visitante}"
-    url_api_betano = f"https://www.betano.pe/api/results/search/?q={urllib.parse.quote(query)}"
+    if not event_id:
+        return None
+
+    # Endpoint de proveedores de cuotas (Odds) de Sofascore
+    url_odds = f"https://api.sofascore.com/api/v3/event/{event_id}/odds/1/all"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://www.betano.pe/",
-        "X-Requested-With": "XMLHttpRequest",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": "https://www.sofascore.com/",
         "Accept": "application/json"
     }
     
     try:
-        response = requests.get(url_api_betano, headers=headers, timeout=10)
+        response = requests.get(url_odds, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            blocks = data.get("data", {}).get("blocks", [])
-            for block in blocks:
-                for ev in block.get("events", []):
-                    participants = ev.get("participants", [])
-                    nombres_part = [normalizar_texto(p.get("name", "")) for p in participants]
+            markets = data.get("markets", [])
+            for market in markets:
+                market_name = normalizar_texto(market.get("marketName", ""))
+                choices = market.get("choices", [])
+                
+                for choice in choices:
+                    choice_name = normalizar_texto(choice.get("name", ""))
+                    fractional_value = choice.get("initialFractionalValue", "") or choice.get("fractionalValue", "")
                     
-                    # Validar que sea el evento correcto
-                    if any(normalizar_texto(local) in n for n in nombres_part) or any(normalizar_texto(visitante) in n for n in nombres_part):
-                        for market in ev.get("markets", []):
-                            market_name = normalizar_texto(market.get("name", ""))
-                            for sel in market.get("selections", []):
-                                sel_name = normalizar_texto(sel.get("name", ""))
-                                price = sel.get("price")
-                                
-                                if price:
-                                    # Filtrado dinámico según el tipo de mercado del pick
-                                    if tipo_mercado == "Goles Totales" and ("1.5" in market_name or "1.5" in sel_name or "over" in sel_name or "mas de" in sel_name):
-                                        return float(price)
-                                    elif tipo_mercado == "Resultado Final" and ("1" in sel_name or normalizar_texto(local) in sel_name):
-                                        return float(price)
-                                    elif "Córners" in tipo_mercado and ("corner" in market_name or "esquina" in market_name):
-                                        return float(price)
-                                    elif "Remates" in tipo_mercado or "Jugador" in tipo_mercado:
-                                        if "remate" in market_name or "puerta" in sel_name or "over" in sel_name or "gol" in market_name:
-                                            return float(price)
-                                            
-                        # Si encuentra el evento pero no matchea el mercado exacto en la búsqueda rápida, toma la principal disponible del evento
-                        markets_fallback = ev.get("markets", [])
-                        if markets_fallback:
-                            for sel in markets_fallback[0].get("selections", []):
-                                if sel.get("price"):
-                                    return float(sel.get("price"))
+                    # Intentar obtener el valor decimal directamente si existe, o calcularlo desde fraccional
+                    decimal_price = choice.get("decimalValue")
+                    if not decimal_price and fractional_value:
+                        try:
+                            parts = fractional_value.split('/')
+                            if len(parts) == 2:
+                                decimal_price = round((float(parts[0]) / float(parts[1])) + 1.0, 2)
+                        except:
+                            pass
+
+                    if decimal_price:
+                        # Filtrado según el tipo de mercado del pick
+                        if tipo_mercado == "Goles Totales" and ("1.5" in market_name or "over" in market_name or "mas" in choice_name):
+                            return float(decimal_price)
+                        elif tipo_mercado == "Resultado Final" and ("1" in choice_name or "home" in choice_name):
+                            return float(decimal_price)
+                        elif "Córners" in tipo_mercado and ("corner" in market_name or "esquina" in market_name):
+                            return float(decimal_price)
+                        elif "Remates" in tipo_mercado or "Jugador" in tipo_mercado:
+                            if "remate" in market_name or "puerta" in choice_name or "over" in choice_name:
+                                return float(decimal_price)
+                            
+            # Fallback: si hay mercados principales, toma la primera cuota disponible de ganador o línea principal
+            if markets:
+                primera_choice = markets[0].get("choices", [])
+                if primera_choice and "decimalValue" in primera_choice[0]:
+                    return float(primera_choice[0]["decimalValue"])
+                    
     except Exception as e:
-        print(f"[EXCEPCIÓN CUOTA REAL BETANO] {e}")
-    
-    return 1.85  # Cuota de mercado estándar razonable si la API no devuelve el valor directo en la query
+        print(f"[EXCEPCIÓN CUOTAS SOFASCORE] {e}")
+        
+    return None
 
 
 # ==========================================
@@ -126,7 +133,7 @@ def registrar_alerta(alerta_id):
 
 
 # ==========================================
-# MÓDULO: LÓGICA DIFUSA Y NORMALIZACIÓN (FUZZY)
+# MÓDULO: LÓGICA DIFUSA Y NORMALIZACIÓN
 # ==========================================
 def normalizar_texto(texto):
     if not texto:
@@ -148,11 +155,10 @@ def son_mismo_equipo(equipo_excel, equipo_sofascore, umbral=70):
 
 def es_mismo_jugador(nombre_excel, nombre_sofascore, umbral=75):
     j1 = normalizar_texto(nombre_excel)
-    j2 = normalizar_texto(nombre_sofascore> '')
+    j2 = normalizar_texto(nombre_sofascore)
     
     if j1 == j2 or j1 in j2 or j2 in j1:
         return True
-        
     if fuzz.token_set_ratio(j1, j2) >= umbral:
         return True
         
@@ -165,12 +171,11 @@ def es_mismo_jugador(nombre_excel, nombre_sofascore, umbral=75):
 
 
 # ==========================================
-# MÓDULO: BÚSQUEDA Y VALIDACIÓN EN SOFASCORE
+# MÓDULO: SOFASCORE BÚSQUEDA Y ALINEACIONES
 # ==========================================
 def buscar_event_id_sofascore(local, visitante):
     query = f"{local} {visitante}"
     query_encoded = urllib.parse.quote(query)
-    
     url = f"https://api.sofascore.com/api/v3/search/all?q={query_encoded}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -189,22 +194,18 @@ def buscar_event_id_sofascore(local, visitante):
                     away_team = entity.get("awayTeam", {}).get("name", "")
                     
                     if son_mismo_equipo(local, home_team) and son_mismo_equipo(visitante, away_team):
-                        event_id = entity.get("id")
-                        print(f"[SOFASCORE OK] Coincidencia: {home_team} vs {away_team} (ID: {event_id})")
-                        return event_id
-        print(f"[SOFASCORE WARN] No se encontró Event_ID para: {local} vs {visitante}")
-        return None
+                        return entity.get("id")
     except Exception as e:
         print(f"[EXCEPCIÓN SOFASCORE] {e}")
-        return None
+    return None
 
 def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
     if not jugadores_objetivo:
-        return True, "SIN_JUGADORES_QUE_VALIDAR", None
+        return True, "SIN_JUGADORES", None
 
     event_id = buscar_event_id_sofascore(local, visitante)
     if not event_id:
-        return True, "ID_NO_ENCONTRADO_OMITIDO", None
+        return True, "ID_NO_ENCONTRADO", None
 
     url_lineups = f"https://api.sofascore.com/api/v3/event/{event_id}/lineups"
     headers = {
@@ -216,11 +217,11 @@ def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
     try:
         r = requests.get(url_lineups, headers=headers, timeout=10)
         if r.status_code != 200:
-            return True, "ERROR_CONEXION_OMITIDO", event_id
+            return True, "ERROR_CONEXION", event_id
 
         data = r.json()
         if not data.get("confirmed", False):
-            return False, "ESPERANDO_ALINEACION_OFICIAL", event_id
+            return False, "ESPERANDO_ALINEACION", event_id
 
         titulares = []
         for equipo in ["home", "away"]:
@@ -229,15 +230,13 @@ def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
                     titulares.append(p["player"]["name"])
 
         for jugador in jugadores_objetivo:
-            es_titular = any(es_mismo_jugador(jugador, t) for t in titulares)
-            if not es_titular:
-                return False, f"JUGADOR_SUPLENTE: {jugador}", event_id
+            if not any(es_mismo_jugador(jugador, t) for t in titulares):
+                return False, f"SUPLENTE: {jugador}", event_id
 
-        return True, "TITULARES_CONFIRMADOS", event_id
-
+        return True, "CONFIRMADO", event_id
     except Exception as e:
         print(f"[EXCEPCIÓN LINEUPS] {e}")
-        return True, "EXCEPCION_OMITIDA", event_id
+        return True, "EXCEPCION", event_id
 
 
 # ==========================================
@@ -245,21 +244,11 @@ def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
 # ==========================================
 def enviar_telegram(mensaje):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[ERROR] Faltan credenciales de Telegram.")
         return
-    
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": mensaje,
-        "parse_mode": "Markdown"
-    }
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
     try:
-        r = requests.post(url, json=payload, timeout=10)
-        if r.status_code == 200:
-            print("[TELEGRAM] Mensaje enviado correctamente.")
-        else:
-            print(f"[ERROR TELEGRAM] {r.status_code}: {r.text}")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"[EXCEPCIÓN TELEGRAM] {e}")
 
@@ -272,21 +261,16 @@ def analizar_excel():
     archivos = glob.glob("*.xlsx")
     
     if not archivos:
-        print("[ERROR] No se encontró ningún archivo .xlsx.")
         return
 
     excel_path = archivos[0]
-    print(f"[INFO] Leyendo archivo: {excel_path}")
-
     try:
         xls = pd.ExcelFile(excel_path)
         df_partidos = pd.read_excel(xls, sheet_name="Partidos")
-        
         df_jugadores = pd.DataFrame(columns=["Jugador", "Equipo", "Remates al Arco", "Goles", "Asistencias"])
         if "Estadísticas Jugadores" in xls.sheet_names:
             df_jugadores = pd.read_excel(xls, sheet_name="Estadísticas Jugadores")
     except Exception as e:
-        print(f"[ERROR EXCEL] Error al leer hojas: {e}")
         return
 
     df_partidos = df_partidos.dropna(subset=["Local", "Visitante"])
@@ -294,7 +278,6 @@ def analizar_excel():
     partidos_pendientes = df_partidos[df_partidos["Goles L"].isna()].copy()
 
     if partidos_pendientes.empty:
-        print("[INFO] No hay partidos pendientes en el Excel.")
         return
 
     todas_las_propuestas = []
@@ -306,7 +289,6 @@ def analizar_excel():
         jornada_txt = int(jornada) if pd.notna(jornada) and isinstance(jornada, (int, float)) else str(jornada)
 
         alerta_id = f"J{jornada_txt}_{normalizar_texto(local)}_vs_{normalizar_texto(visita)}"
-        
         if alerta_id in historial:
             continue
 
@@ -332,124 +314,56 @@ def analizar_excel():
         jugadores_a_validar = []
 
         if prom_goles_L >= 2.3 and prom_goles_V <= 0.7:
-            familias_seleccionadas.append({
-                "familia": "Resultado Final",
-                "texto": f"Victoria de {local} (1)",
-                "razon": f"{local} promedia {prom_goles_L:.1f} goles favor vs {prom_goles_V:.1f} de {visita}",
-                "score": 89.5
-            })
+            familias_seleccionadas.append({"familia": "Resultado Final", "texto": f"Victoria de {local} (1)", "razon": f"{local} promedia {prom_goles_L:.1f} goles favor", "score": 89.5})
 
         if (prom_goles_L + prom_goles_V) >= 2.2:
-            familias_seleccionadas.append({
-                "familia": "Goles Totales",
-                "texto": "Over 1.5 Goles Totales del Partido",
-                "razon": f"Promedio conjunto de {prom_goles_L + prom_goles_V:.1f} goles por partido",
-                "score": 90.0
-            })
-
-        tiene_1x2 = any(item["familia"] == "Resultado Final" for item in familias_seleccionadas)
-        if not tiene_1x2 and prom_goles_L >= 1.5:
-            familias_seleccionadas.append({
-                "familia": "Goles Equipo",
-                "texto": f"{local} ➔ Over 0.5 Goles (Equipo)",
-                "razon": f"{local} promedia {prom_goles_L:.1f} goles anotados por partido",
-                "score": 88.5
-            })
+            familias_seleccionadas.append({"familia": "Goles Totales", "texto": "Over 1.5 Goles Totales del Partido", "razon": f"Promedio conjunto de {prom_goles_L + prom_goles_V:.1f} goles", "score": 90.0})
 
         if (prom_corners_L + prom_corners_V) >= 8.5:
-            familias_seleccionadas.append({
-                "familia": "Córners",
-                "texto": "Over 7.5 Córners Totales del Partido",
-                "razon": f"Promedio combinado de {prom_corners_L + prom_corners_V:.1f} tiros de esquina",
-                "score": 89.0
-            })
-        elif prom_corners_L >= 4.5:
-            familias_seleccionadas.append({
-                "familia": "Córners",
-                "texto": f"{local} ➔ Over 3.5 Córners Totales",
-                "razon": f"{local} genera en promedio {prom_corners_L:.1f} córners",
-                "score": 88.0
-            })
-
-        if prom_remates_L >= 4.5:
-            familias_seleccionadas.append({
-                "familia": "Remates Equipo",
-                "texto": f"{local} ➔ Over 3.5 Remates a Puerta",
-                "razon": f"{local} registra {prom_remates_L:.1f} tiros a puerta por partido",
-                "score": 88.5
-            })
+            familias_seleccionadas.append({"familia": "Córners", "texto": "Over 7.5 Córners Totales del Partido", "razon": f"Promedio de {prom_corners_L + prom_corners_V:.1f} córners", "score": 89.0})
 
         if not df_jugadores.empty and "Equipo" in df_jugadores.columns:
             jugadores_partido = df_jugadores[df_jugadores["Equipo"].isin([local, visita])].copy()
-            
             if "Remates al Arco" in jugadores_partido.columns and not jugadores_partido.empty:
                 rematadores = jugadores_partido[jugadores_partido["Remates al Arco"] >= 2]
                 if not rematadores.empty:
                     top_r = rematadores.sort_values(by="Remates al Arco", ascending=False).iloc[0]
-                    familias_seleccionadas.append({
-                        "familia": "Remates Jugador",
-                        "texto": f"{top_r['Jugador']} ({top_r['Equipo']}) ➔ Over 0.5 Remates a Puerta",
-                        "razon": f"Registra {int(top_r['Remates al Arco'])} tiros directos en sus apariciones",
-                        "score": 91.0
-                    })
+                    familias_seleccionadas.append({"familia": "Remates Jugador", "texto": f"{top_r['Jugador']} ➔ Over 0.5 Remates a Puerta", "razon": f"Registra tiros directos previos", "score": 91.0})
                     jugadores_a_validar.append(str(top_r['Jugador']))
 
-            if not jugadores_partido.empty:
-                goles_col = jugadores_partido["Goles"].fillna(0) if "Goles" in jugadores_partido.columns else 0
-                asist_col = jugadores_partido["Asistencias"].fillna(0) if "Asistencias" in jugadores_partido.columns else 0
-                jugadores_partido["Participacion"] = goles_col + asist_col
-                
-                goleadores = jugadores_partido[jugadores_partido["Participacion"] >= 2]
-                if not goleadores.empty:
-                    top_g = goleadores.sort_values(by="Participacion", ascending=False).iloc[0]
-                    familias_seleccionadas.append({
-                        "familia": "Jugador Gol/Asistencia",
-                        "texto": f"{top_g['Jugador']} ({top_g['Equipo']}) ➔ Gol o Asistencia / Anota en cualquier momento",
-                        "razon": f"Suma {int(top_g['Participacion'])} participaciones directas de gol",
-                        "score": 89.0
-                    })
-                    jugadores_a_validar.append(str(top_g['Jugador']))
-
         jugadores_a_validar = list(set(jugadores_a_validar))
-
-        es_valido, motivo, event_id = validar_titulares_sofascore(local, visita, jugadores_a_validar)
+        es_valido, _, event_id = validar_titulares_sofascore(local, visita, jugadores_a_validar)
         if not es_valido:
             continue
 
         familias_validas = sorted(familias_seleccionadas, key=lambda x: x["score"], reverse=True)
-
         if familias_validas:
             pick = familias_validas[0]
-            # LLAMADA A LA NUEVA FUNCIÓN DE CUOTA REAL DINÁMICA
-            cuota_real = obtener_cuota_real_betano(local, visita, pick["familia"])
-            cuota_viva_real = f"{cuota_real:.2f}"
+            
+            # EXTRACCIÓN DE CUOTA REAL DESDE EL MÓDULO DE SOFASCORE
+            cuota_real = obtener_cuota_real_sofascore(event_id, pick["familia"])
+            if cuota_real is None:
+                print(f"[ADVERTENCIA] No hay cuotas disponibles en Sofascore para {local} vs {visita}. Pick omitido.")
+                continue
             
             todas_las_propuestas.append({
                 "alerta_id": alerta_id,
-                "tipo": "SIMPLE",
                 "partido": f"{local} vs. {visita}",
                 "jornada": jornada_txt,
                 "fecha_partido": obtener_fecha_hora_partido(event_id)[0] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%d/%m/%Y"),
                 "hora_partido": obtener_fecha_hora_partido(event_id)[1] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%H:%M:%S"),
                 "pick": pick,
                 "score": pick["score"],
-                "sustento": pick["razon"],
-                "cuota": cuota_viva_real
+                "cuota": f"{cuota_real:.2f}"
             })
 
     propuestas_filtradas = [p for p in todas_las_propuestas if p["score"] >= PROBABILIDAD_MINIMA_FILTRO]
     propuestas_filtradas.sort(key=lambda x: x["score"], reverse=True)
 
-    top_selecciones = propuestas_filtradas[:MAX_ALERTAS_POR_JORNADA]
-
-    if not top_selecciones:
-        print("[INFO] No hay propuestas nuevas para notificar.")
-        return
-
-    for propuesta in top_selecciones:
+    for propuesta in propuestas_filtradas[:MAX_ALERTAS_POR_JORNADA]:
         pick = propuesta["pick"]
         mensaje = (
-            f"🎯 *[SELECCIÓN DE ALTA PROBABILIDAD - PICK SIMPLE]*\n"
+            f"🎯 *[SELECCIÓN VERIFICADA - SOFASCORE]*\n"
             f"🏆 *Jornada:* {propuesta['jornada']}\n"
             f"🏟️ *Partido:* {propuesta['partido']}\n"
             f"📅 *Fecha:* {propuesta['fecha_partido']} | ⏰ *Hora:* {propuesta['hora_partido']}\n"
@@ -457,10 +371,10 @@ def analizar_excel():
             f"📌 *Mercado:* {pick['familia']}\n"
             f"👉 *{pick['texto']}*\n"
             f"───────────────────────────\n"
-            f"📊 *Sustento Estadístico:* {pick['razon']}\n"
-            f"🔥 *Nivel de Confianza:* {propuesta['score']:.1f}%\n"
-            f"💰 *Cuota Real Betano:* {propuesta['cuota']}\n"
-            f"🛡️ *Perfil:* Value Bettor Conservador-Activo"
+            f"📊 *Sustento:* {pick['razon']}\n"
+            f"🔥 *Confianza:* {propuesta['score']:.1f}%\n"
+            f"💰 *Cuota de Mercado (Sofascore):* {propuesta['cuota']}\n"
+            f"🛡️ *Perfil:* Value Bettor Conservador"
         )
         enviar_telegram(mensaje)
         registrar_alerta(propuesta["alerta_id"])
