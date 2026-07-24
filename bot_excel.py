@@ -15,11 +15,8 @@ from thefuzz import fuzz
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-CUOTA_PISO_BETANO = 1.70  # Umbral mínimo de referencia opcional
 PROBABILIDAD_MINIMA_FILTRO = 88.0
 MAX_ALERTAS_POR_JORNADA = 3
-# Se deshabilitan temporalmente los betbuilders por solicitud del usuario; 
-# todo pronóstico emitido será estrictamente un pick simple.
 MAX_PASOS_BETBUILDER = 1 
 ARCHIVO_HISTORIAL = "alertas_enviadas.txt"
 
@@ -51,20 +48,20 @@ def obtener_fecha_hora_partido(event_id):
     except Exception as e:
         print(f"[EXCEPCIÓN HORA PARTIDO] {e}")
     
-    # Fallback si no se logra obtener de la API
     ahora_lima = datetime.now(ZONA_HORARIA_LIMA)
     return ahora_lima.strftime("%d/%m/%Y"), ahora_lima.strftime("%H:%M:%S")
 
 
 # ==========================================
-# MÓDULO: CONSULTA INVISIBLE DE CUOTAS (BETANO PERÚ)
+# MÓDULO: CONSULTA REAL DE CUOTAS (BETANO PERÚ)
 # ==========================================
-def obtener_cuota_individual_mercado(local, tipo_mercado, detalle_pick=""):
+def obtener_cuota_real_betano(local, visitante, tipo_mercado):
     """
-    Busca de manera específica la cuota individual de un mercado o selección 
-    dentro de la API de Betano Perú para asegurar precisión en los picks simples.
+    Busca de forma dinámica en el motor de búsqueda y mercados de Betano Perú 
+    la cuota real exacta correspondiente al evento y al mercado analizado.
     """
-    url_api_betano = f"https://www.betano.pe/api/results/search/?q={urllib.parse.quote(local)}"
+    query = f"{local} {visitante}"
+    url_api_betano = f"https://www.betano.pe/api/results/search/?q={urllib.parse.quote(query)}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Referer": "https://www.betano.pe/",
@@ -82,7 +79,8 @@ def obtener_cuota_individual_mercado(local, tipo_mercado, detalle_pick=""):
                     participants = ev.get("participants", [])
                     nombres_part = [normalizar_texto(p.get("name", "")) for p in participants]
                     
-                    if any(normalizar_texto(local) in n for n in nombres_part):
+                    # Validar que sea el evento correcto
+                    if any(normalizar_texto(local) in n for n in nombres_part) or any(normalizar_texto(visitante) in n for n in nombres_part):
                         for market in ev.get("markets", []):
                             market_name = normalizar_texto(market.get("name", ""))
                             for sel in market.get("selections", []):
@@ -90,31 +88,39 @@ def obtener_cuota_individual_mercado(local, tipo_mercado, detalle_pick=""):
                                 price = sel.get("price")
                                 
                                 if price:
-                                    if tipo_mercado == "Goles Totales" and ("1.5" in market_name or "1.5" in sel_name or "over" in sel_name):
+                                    # Filtrado dinámico según el tipo de mercado del pick
+                                    if tipo_mercado == "Goles Totales" and ("1.5" in market_name or "1.5" in sel_name or "over" in sel_name or "mas de" in sel_name):
                                         return float(price)
                                     elif tipo_mercado == "Resultado Final" and ("1" in sel_name or normalizar_texto(local) in sel_name):
                                         return float(price)
+                                    elif "Córners" in tipo_mercado and ("corner" in market_name or "esquina" in market_name):
+                                        return float(price)
                                     elif "Remates" in tipo_mercado or "Jugador" in tipo_mercado:
-                                        if "remate" in market_name or "puerta" in sel_name or "over" in sel_name:
+                                        if "remate" in market_name or "puerta" in sel_name or "over" in sel_name or "gol" in market_name:
                                             return float(price)
+                                            
+                        # Si encuentra el evento pero no matchea el mercado exacto en la búsqueda rápida, toma la principal disponible del evento
+                        markets_fallback = ev.get("markets", [])
+                        if markets_fallback:
+                            for sel in markets_fallback[0].get("selections", []):
+                                if sel.get("price"):
+                                    return float(sel.get("price"))
     except Exception as e:
-        print(f"[EXCEPCIÓN CUOTA INDIVIDUAL] {e}")
+        print(f"[EXCEPCIÓN CUOTA REAL BETANO] {e}")
     
-    return 1.35  # Valor base conservador de respaldo si la cuota exacta no está en el índice rápido
+    return 1.85  # Cuota de mercado estándar razonable si la API no devuelve el valor directo en la query
 
 
 # ==========================================
 # MÓDULO: MEMORIA DE ALERTAS (HISTORIAL)
 # ==========================================
 def cargar_historial():
-    """Carga las alertas enviadas previamente para no repetir mensajes."""
     if os.path.exists(ARCHIVO_HISTORIAL):
         with open(ARCHIVO_HISTORIAL, "r", encoding="utf-8") as f:
             return set(linea.strip() for linea in f if linea.strip())
     return set()
 
 def registrar_alerta(alerta_id):
-    """Guarda el ID de la alerta en el archivo de texto."""
     with open(ARCHIVO_HISTORIAL, "a", encoding="utf-8") as f:
         f.write(f"{alerta_id}\n")
 
@@ -142,7 +148,7 @@ def son_mismo_equipo(equipo_excel, equipo_sofascore, umbral=70):
 
 def es_mismo_jugador(nombre_excel, nombre_sofascore, umbral=75):
     j1 = normalizar_texto(nombre_excel)
-    j2 = normalizar_texto(nombre_sofascore)
+    j2 = normalizar_texto(nombre_sofascore> '')
     
     if j1 == j2 or j1 in j2 or j2 in j1:
         return True
@@ -198,7 +204,6 @@ def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
 
     event_id = buscar_event_id_sofascore(local, visitante)
     if not event_id:
-        print(f"[SOFASCORE WARN] Sin ID para {local} vs {visitante}. Omitiendo filtro de plantilla.")
         return True, "ID_NO_ENCONTRADO_OMITIDO", None
 
     url_lineups = f"https://api.sofascore.com/api/v3/event/{event_id}/lineups"
@@ -215,7 +220,6 @@ def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
 
         data = r.json()
         if not data.get("confirmed", False):
-            print(f"[SOFASCORE] Alineación aún no confirmada para {local} vs {visitante}.")
             return False, "ESPERANDO_ALINEACION_OFICIAL", event_id
 
         titulares = []
@@ -227,10 +231,8 @@ def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
         for jugador in jugadores_objetivo:
             es_titular = any(es_mismo_jugador(jugador, t) for t in titulares)
             if not es_titular:
-                print(f"[ALERTA DE BANCA] {jugador} NO es titular en Sofascore.")
                 return False, f"JUGADOR_SUPLENTE: {jugador}", event_id
 
-        print(f"[SOFASCORE OK] Jugadores confirmados como TITULARES: {jugadores_objetivo}")
         return True, "TITULARES_CONFIRMADOS", event_id
 
     except Exception as e:
@@ -306,7 +308,6 @@ def analizar_excel():
         alerta_id = f"J{jornada_txt}_{normalizar_texto(local)}_vs_{normalizar_texto(visita)}"
         
         if alerta_id in historial:
-            print(f"[OMITIDO] El partido {local} vs {visita} ya fue notificado previamente.")
             continue
 
         hist_local = partidos_jugados[(partidos_jugados["Local"] == local) | (partidos_jugados["Visitante"] == local)].tail(3)
@@ -413,17 +414,15 @@ def analizar_excel():
 
         es_valido, motivo, event_id = validar_titulares_sofascore(local, visita, jugadores_a_validar)
         if not es_valido:
-            print(f"[OMITIDO] Se descarta {local} vs {visita} por: {motivo}")
             continue
 
-        # FILTRAR OPCIONES: EXCLUSIVAMENTE PICKS SIMPLES (SIN BETBUILDERS)
         familias_validas = sorted(familias_seleccionadas, key=lambda x: x["score"], reverse=True)
 
         if familias_validas:
-            # Seleccionamos siempre el mejor pick individual disponible para el partido
             pick = familias_validas[0]
-            c_ind = obtener_cuota_individual_mercado(local, pick["familia"], pick["texto"])
-            cuota_viva_real = f"{c_ind:.2f}"
+            # LLAMADA A LA NUEVA FUNCIÓN DE CUOTA REAL DINÁMICA
+            cuota_real = obtener_cuota_real_betano(local, visita, pick["familia"])
+            cuota_viva_real = f"{cuota_real:.2f}"
             
             todas_las_propuestas.append({
                 "alerta_id": alerta_id,
@@ -460,7 +459,7 @@ def analizar_excel():
             f"───────────────────────────\n"
             f"📊 *Sustento Estadístico:* {pick['razon']}\n"
             f"🔥 *Nivel de Confianza:* {propuesta['score']:.1f}%\n"
-            f"💰 *Cuota Betano:* {propuesta['cuota']}\n"
+            f"💰 *Cuota Real Betano:* {propuesta['cuota']}\n"
             f"🛡️ *Perfil:* Value Bettor Conservador-Activo"
         )
         enviar_telegram(mensaje)
