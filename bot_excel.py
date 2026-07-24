@@ -55,8 +55,52 @@ def obtener_fecha_hora_partido(event_id):
 
 
 # ==========================================
-# MÓDULO: CONSULTA INVISIBLE (BETANO PERÚ)
+# MÓDULO: CONSULTA INVISIBLE Y ESTIMACIÓN BETBUILDER (BETANO PERÚ)
 # ==========================================
+def obtener_cuota_individual_mercado(local, tipo_mercado, detalle_pick=""):
+    """
+    Busca de manera específica la cuota individual de un mercado o selección 
+    dentro de la API de Betano Perú para construir estimaciones precisas.
+    """
+    url_api_betano = f"https://www.betano.pe/api/results/search/?q={urllib.parse.quote(local)}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://www.betano.pe/",
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json"
+    }
+    
+    try:
+        response = requests.get(url_api_betano, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            blocks = data.get("data", {}).get("blocks", [])
+            for block in blocks:
+                for ev in block.get("events", []):
+                    participants = ev.get("participants", [])
+                    nombres_part = [normalizar_texto(p.get("name", "")) for p in participants]
+                    
+                    if any(normalizar_texto(local) in n for n in nombres_part):
+                        for market in ev.get("markets", []):
+                            market_name = normalizar_texto(market.get("name", ""))
+                            for sel in market.get("selections", []):
+                                sel_name = normalizar_texto(sel.get("name", ""))
+                                price = sel.get("price")
+                                
+                                if price:
+                                    if tipo_mercado == "Goles Totales" and ("1.5" in market_name or "1.5" in sel_name or "over" in sel_name):
+                                        return float(price)
+                                    elif tipo_mercado == "Resultado Final" and ("1" in sel_name or normalizar_texto(local) in sel_name):
+                                        return float(price)
+                                    elif "Remates" in tipo_mercado or "Jugador" in tipo_mercado:
+                                        if "remate" in market_name or "puerta" in sel_name or "over" in sel_name:
+                                            return float(price)
+    except Exception as e:
+        print(f"[EXCEPCIÓN CUOTA INDIVIDUAL] {e}")
+    
+    return 1.35  # Valor base conservador de respaldo si la cuota exacta no está en el índice rápido
+
+
 def obtener_cuotas_betano_invisible(local, visita):
     """
     Consulta mediante ingeniería inversa de red el endpoint interno de Betano Perú 
@@ -84,7 +128,6 @@ def obtener_cuotas_betano_invisible(local, visita):
                     participants = ev.get("participants", [])
                     nombres_part = [normalizar_texto(p.get("name", "")) for p in participants]
                     
-                    # Verificamos si corresponde al partido buscado
                     if any(normalizar_texto(local) in n for n in nombres_part) or any(normalizar_texto(visita) in n for n in nombres_part):
                         markets = ev.get("markets", [])
                         for market in markets:
@@ -94,7 +137,6 @@ def obtener_cuotas_betano_invisible(local, visita):
                                 sel_name = normalizar_texto(sel.get("name", ""))
                                 price = sel.get("price")
                                 
-                                # Buscamos específicamente cuotas del mercado Over 1.5 o líneas similares
                                 if price and ("1.5" in market_name or "1.5" in sel_name or "over" in sel_name):
                                     cuota_extraida = str(price)
                                     break
@@ -423,20 +465,30 @@ def analizar_excel():
             print(f"[OMITIDO] Se descarta {local} vs {visita} por: {motivo}")
             continue
 
-        cuota_viva_real = obtener_cuotas_betano_invisible(local, visita)
-        fecha_partido, hora_partido = obtener_fecha_hora_partido(event_id) if event_id else (datetime.now(ZONA_HORARIA_LIMA).strftime("%d/%m/%Y"), datetime.now(ZONA_HORARIA_LIMA).strftime("%H:%M:%S"))
-
+        # OBTENCIÓN Y ESTIMACIÓN INTELIGENTE PARA BETBUILDER / SIMPLE
         if len(familias_seleccionadas) >= 2:
             familias_seleccionadas.sort(key=lambda x: x["score"], reverse=True)
             picks_finales = familias_seleccionadas[:MAX_PASOS_BETBUILDER]
+            
+            # Estimación interna combinada para Betbuilder
+            cuotas_componentes = []
+            for pick in picks_finales:
+                c_ind = obtener_cuota_individual_mercado(local, pick["familia"], pick["texto"])
+                cuotas_componentes.append(c_ind)
+            
+            producto_neto = 1.0
+            for c in cuotas_componentes:
+                producto_neto *= c
+            cuota_viva_real = f"{producto_neto * 0.94:.2f} (Estimada Betbuilder)"
+            
             score_promedio = sum(c['score'] for c in picks_finales) / len(picks_finales)
             todas_las_propuestas.append({
                 "alerta_id": alerta_id,
                 "tipo": "BETBUILDER",
                 "partido": f"{local} vs. {visita}",
                 "jornada": jornada_txt,
-                "fecha_partido": fecha_partido,
-                "hora_partido": hora_partido,
+                "fecha_partido": obtener_fecha_hora_partido(event_id)[0] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%d/%m/%Y"),
+                "hora_partido": obtener_fecha_hora_partido(event_id)[1] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%H:%M:%S"),
                 "picks": picks_finales,
                 "score": score_promedio,
                 "sustento": picks_finales[0]["razon"],
@@ -444,13 +496,16 @@ def analizar_excel():
             })
         elif len(familias_seleccionadas) == 1:
             pick = familias_seleccionadas[0]
+            c_ind = obtener_cuota_individual_mercado(local, pick["familia"], pick["texto"])
+            cuota_viva_real = f"{c_ind:.2f}"
+            
             todas_las_propuestas.append({
                 "alerta_id": alerta_id,
                 "tipo": "SIMPLE",
                 "partido": f"{local} vs. {visita}",
                 "jornada": jornada_txt,
-                "fecha_partido": fecha_partido,
-                "hora_partido": hora_partido,
+                "fecha_partido": obtener_fecha_hora_partido(event_id)[0] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%d/%m/%Y"),
+                "hora_partido": obtener_fecha_hora_partido(event_id)[1] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%H:%M:%S"),
                 "pick": pick,
                 "score": pick["score"],
                 "sustento": pick["razon"],
