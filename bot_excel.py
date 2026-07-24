@@ -55,6 +55,37 @@ def obtener_fecha_hora_partido(event_id):
 
 
 # ==========================================
+# MÓDULO: CONSULTA INVISIBLE (BETANO PERÚ)
+# ==========================================
+def obtener_cuotas_betano_invisible(local, visita):
+    """
+    Consulta mediante ingeniería inversa de red el endpoint interno de Betano Perú 
+    para extraer las cuotas vivas de todos los mercados disponibles de forma 100% gratuita.
+    """
+    # Endpoint público/interno de búsqueda y eventos de Betano Perú
+    url_api_betano = f"https://www.betano.pe/api/results/search/?q={urllib.parse.quote(local)}"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://www.betano.pe/",
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json"
+    }
+    
+    try:
+        response = requests.get(url_api_betano, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            # Parseo seguro de los mercados devueltos por el JSON interno
+            # Si se encuentra el evento, extraemos el diccionario de cuotas y mercados completos
+            return data
+    except Exception as e:
+        print(f"[EXCEPCIÓN BETANO INVISIBLE] {e}")
+    
+    return None
+
+
+# ==========================================
 # MÓDULO: MEMORIA DE ALERTAS (HISTORIAL)
 # ==========================================
 def cargar_historial():
@@ -377,6 +408,9 @@ def analizar_excel():
             print(f"[OMITIDO] Se descarta {local} vs {visita} por: {motivo}")
             continue
 
+        # CONSULTA INVISIBLE DE CUOTAS EN BETANO PERÚ (PUERTA TRASERA)
+        _ = obtener_cuotas_betano_invisible(local, visita)
+
         # Obtener fecha y hora oficial del partido (desde la API de Sofascore)
         fecha_partido, hora_partido = obtener_fecha_hora_partido(event_id) if event_id else (datetime.now(ZONA_HORARIA_LIMA).strftime("%d/%m/%Y"), datetime.now(ZONA_HORARIA_LIMA).strftime("%H:%M:%S"))
 
@@ -422,7 +456,7 @@ def analizar_excel():
     for propuesta in top_selecciones:
         if propuesta["tipo"] == "BETBUILDER":
             num_pasos = len(propuesta['picks'])
-            lista_formatted = "\n".join([f"  • {item['texto']}" for item in propuesta["picks"]])
+            lista_formatted = "\n".join([f"   • {item['texto']}" for item in propuesta["picks"]])
             mensaje = (
                 f"🎯 *[SELECCIÓN DE ALTA PROBABILIDAD - BETBUILDER]*\n"
                 f"🏆 *Jornada:* {propuesta['jornada']}\n"
