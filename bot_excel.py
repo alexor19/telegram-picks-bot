@@ -465,12 +465,24 @@ def analizar_excel():
             print(f"[OMITIDO] Se descarta {local} vs {visita} por: {motivo}")
             continue
 
-        # OBTENCIÓN Y ESTIMACIÓN INTELIGENTE PARA BETBUILDER / SIMPLE
-        if len(familias_seleccionadas) >= 2:
-            familias_seleccionadas.sort(key=lambda x: x["score"], reverse=True)
-            picks_finales = familias_seleccionadas[:MAX_PASOS_BETBUILDER]
+        # FILTRAR FAMILIAS PARA BETBUILDER: MÁXIMO UN SOLO MERCADO DE JUGADORES
+        familias_validas_bb = []
+        contador_jugadores = 0
+        for item in sorted(familias_seleccionadas, key=lambda x: x["score"], reverse=True):
+            es_mercado_jugador = item["familia"] in ["Remates Jugador", "Jugador Gol/Asistencia"]
+            if es_mercado_jugador:
+                if contador_jugadores < 1:
+                    familias_validas_bb.append(item)
+                    contador_jugadores += 1
+            else:
+                familias_validas_bb.append(item)
+
+        # ALTERNANCIA INTELIGENTE ENTRE SIMPLE Y BETBUILDER
+        # Si hay suficientes opciones calificadas, decidimos dinámicamente si crear Betbuilder o Simple
+        if len(familias_validas_bb) >= 2:
+            # Seleccionamos hasta MAX_PASOS_BETBUILDER para la combinada
+            picks_finales = familias_validas_bb[:MAX_PASOS_BETBUILDER]
             
-            # Estimación interna combinada para Betbuilder
             cuotas_componentes = []
             for pick in picks_finales:
                 c_ind = obtener_cuota_individual_mercado(local, pick["familia"], pick["texto"])
@@ -482,20 +494,38 @@ def analizar_excel():
             cuota_viva_real = f"{producto_neto * 0.94:.2f} (Estimada Betbuilder)"
             
             score_promedio = sum(c['score'] for c in picks_finales) / len(picks_finales)
-            todas_las_propuestas.append({
-                "alerta_id": alerta_id,
-                "tipo": "BETBUILDER",
-                "partido": f"{local} vs. {visita}",
-                "jornada": jornada_txt,
-                "fecha_partido": obtener_fecha_hora_partido(event_id)[0] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%d/%m/%Y"),
-                "hora_partido": obtener_fecha_hora_partido(event_id)[1] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%H:%M:%S"),
-                "picks": picks_finales,
-                "score": score_promedio,
-                "sustento": picks_finales[0]["razon"],
-                "cuota": cuota_viva_real
-            })
-        elif len(familias_seleccionadas) == 1:
-            pick = familias_seleccionadas[0]
+            
+            # Si solo quedó 1 paso útil tras el filtro o por decisión analítica, emitimos Simple, de lo contrario Betbuilder
+            if len(picks_finales) == 1:
+                pick = picks_finales[0]
+                c_ind = obtener_cuota_individual_mercado(local, pick["familia"], pick["texto"])
+                todas_las_propuestas.append({
+                    "alerta_id": alerta_id,
+                    "tipo": "SIMPLE",
+                    "partido": f"{local} vs. {visita}",
+                    "jornada": jornada_txt,
+                    "fecha_partido": obtener_fecha_hora_partido(event_id)[0] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%d/%m/%Y"),
+                    "hora_partido": obtener_fecha_hora_partido(event_id)[1] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%H:%M:%S"),
+                    "pick": pick,
+                    "score": pick["score"],
+                    "sustento": pick["razon"],
+                    "cuota": f"{c_ind:.2f}"
+                })
+            else:
+                todas_las_propuestas.append({
+                    "alerta_id": alerta_id,
+                    "tipo": "BETBUILDER",
+                    "partido": f"{local} vs. {visita}",
+                    "jornada": jornada_txt,
+                    "fecha_partido": obtener_fecha_hora_partido(event_id)[0] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%d/%m/%Y"),
+                    "hora_partido": obtener_fecha_hora_partido(event_id)[1] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%H:%M:%S"),
+                    "picks": picks_finales,
+                    "score": score_promedio,
+                    "sustento": picks_finales[0]["razon"],
+                    "cuota": cuota_viva_real
+                })
+        elif len(familias_validas_bb) == 1:
+            pick = familias_validas_bb[0]
             c_ind = obtener_cuota_individual_mercado(local, pick["familia"], pick["texto"])
             cuota_viva_real = f"{c_ind:.2f}"
             
@@ -531,7 +561,7 @@ def analizar_excel():
                 f"🏟️ *Partido:* {propuesta['partido']}\n"
                 f"📅 *Fecha:* {propuesta['fecha_partido']} | ⏰ *Hora:* {propuesta['hora_partido']}\n"
                 f"───────────────────────────\n"
-                f"🧩 *COMBINACIÓN FILTRADA ({num_pasos} Pasos):*\n"
+                f"🧩 *COMBINADA FILTRADA ({num_pasos} Pasos - Máx 1 Jugador):*\n"
                 f"{lista_formatted}\n"
                 f"───────────────────────────\n"
                 f"📊 *Sustento Principal:* {propuesta['sustento']}\n"
