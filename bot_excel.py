@@ -26,10 +26,30 @@ ZONA_HORARIA_LIMA = pytz.timezone("America/Lima")
 
 
 # ==========================================
-# MÓDULO: FECHA Y HORA OFICIAL
+# MÓDULO: FECHA Y HORA DEL PARTIDO
 # ==========================================
-def obtener_fecha_hora_actual():
-    """Retorna la fecha y hora actual sincronizada con la zona horaria de Lima, Perú."""
+def obtener_fecha_hora_partido(event_id):
+    """Obtiene la fecha y hora oficial del partido desde la API de Sofascore convertida a la hora de Lima, Perú."""
+    url = f"https://api.sofascore.com/api/v3/event/{event_id}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": "https://www.sofascore.com/",
+        "Accept": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            evento = response.json().get("event", {})
+            timestamp = evento.get("startTimestamp")
+            if timestamp:
+                dt_utc = datetime.fromtimestamp(timestamp, pytz.utc)
+                dt_lima = dt_utc.astimezone(ZONA_HORARIA_LIMA)
+                return dt_lima.strftime("%d/%m/%Y"), dt_lima.strftime("%H:%M:%S")
+    except Exception as e:
+        print(f"[EXCEPCIÓN HORA PARTIDO] {e}")
+    
+    # Fallback si no se logra obtener de la API
     ahora_lima = datetime.now(ZONA_HORARIA_LIMA)
     return ahora_lima.strftime("%d/%m/%Y"), ahora_lima.strftime("%H:%M:%S")
 
@@ -125,12 +145,12 @@ def buscar_event_id_sofascore(local, visitante):
 
 def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
     if not jugadores_objetivo:
-        return True, "SIN_JUGADORES_QUE_VALIDAR"
+        return True, "SIN_JUGADORES_QUE_VALIDAR", None
 
     event_id = buscar_event_id_sofascore(local, visitante)
     if not event_id:
         print(f"[SOFASCORE WARN] Sin ID para {local} vs {visitante}. Omitiendo filtro de plantilla.")
-        return True, "ID_NO_ENCONTRADO_OMITIDO"
+        return True, "ID_NO_ENCONTRADO_OMITIDO", None
 
     url_lineups = f"https://api.sofascore.com/api/v3/event/{event_id}/lineups"
     headers = {
@@ -142,12 +162,12 @@ def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
     try:
         r = requests.get(url_lineups, headers=headers, timeout=10)
         if r.status_code != 200:
-            return True, "ERROR_CONEXION_OMITIDO"
+            return True, "ERROR_CONEXION_OMITIDO", event_id
 
         data = r.json()
         if not data.get("confirmed", False):
             print(f"[SOFASCORE] Alineación aún no confirmada para {local} vs {visitante}.")
-            return False, "ESPERANDO_ALINEACION_OFICIAL"
+            return False, "ESPERANDO_ALINEACION_OFICIAL", event_id
 
         titulares = []
         for equipo in ["home", "away"]:
@@ -159,14 +179,14 @@ def validar_titulares_sofascore(local, visitante, jugadores_objetivo):
             es_titular = any(es_mismo_jugador(jugador, t) for t in titulares)
             if not es_titular:
                 print(f"[ALERTA DE BANCA] {jugador} NO es titular en Sofascore.")
-                return False, f"JUGADOR_SUPLENTE: {jugador}"
+                return False, f"JUGADOR_SUPLENTE: {jugador}", event_id
 
         print(f"[SOFASCORE OK] Jugadores confirmados como TITULARES: {jugadores_objetivo}")
-        return True, "TITULARES_CONFIRMADOS"
+        return True, "TITULARES_CONFIRMADOS", event_id
 
     except Exception as e:
         print(f"[EXCEPCIÓN LINEUPS] {e}")
-        return True, "EXCEPCION_OMITIDA"
+        return True, "EXCEPCION_OMITIDA", event_id
 
 
 # ==========================================
@@ -351,11 +371,14 @@ def analizar_excel():
 
         jugadores_a_validar = list(set(jugadores_a_validar))
 
-        # VALIDACIÓN EN SOFASCORE
-        es_valido, motivo = validar_titulares_sofascore(local, visita, jugadores_a_validar)
+        # VALIDACIÓN EN SOFASCORE Y OBTENCIÓN DE EVENT_ID
+        es_valido, motivo, event_id = validar_titulares_sofascore(local, visita, jugadores_a_validar)
         if not es_valido:
             print(f"[OMITIDO] Se descarta {local} vs {visita} por: {motivo}")
             continue
+
+        # Obtener fecha y hora oficial del partido (desde la API de Sofascore)
+        fecha_partido, hora_partido = obtener_fecha_hora_partido(event_id) if event_id else (datetime.now(ZONA_HORARIA_LIMA).strftime("%d/%m/%Y"), datetime.now(ZONA_HORARIA_LIMA).strftime("%H:%M:%S"))
 
         if len(familias_seleccionadas) >= 2:
             familias_seleccionadas.sort(key=lambda x: x["score"], reverse=True)
@@ -366,6 +389,8 @@ def analizar_excel():
                 "tipo": "BETBUILDER",
                 "partido": f"{local} vs. {visita}",
                 "jornada": jornada_txt,
+                "fecha_partido": fecha_partido,
+                "hora_partido": hora_partido,
                 "picks": picks_finales,
                 "score": score_promedio,
                 "sustento": picks_finales[0]["razon"]
@@ -377,6 +402,8 @@ def analizar_excel():
                 "tipo": "SIMPLE",
                 "partido": f"{local} vs. {visita}",
                 "jornada": jornada_txt,
+                "fecha_partido": fecha_partido,
+                "hora_partido": hora_partido,
                 "pick": pick,
                 "score": pick["score"],
                 "sustento": pick["razon"]
@@ -392,9 +419,6 @@ def analizar_excel():
         print("[INFO] No hay propuestas nuevas para notificar.")
         return
 
-    # Obtener fecha y hora oficial actual de Lima
-    fecha_actual, hora_actual = obtener_fecha_hora_actual()
-
     for propuesta in top_selecciones:
         if propuesta["tipo"] == "BETBUILDER":
             num_pasos = len(propuesta['picks'])
@@ -403,7 +427,7 @@ def analizar_excel():
                 f"🎯 *[SELECCIÓN DE ALTA PROBABILIDAD - BETBUILDER]*\n"
                 f"🏆 *Jornada:* {propuesta['jornada']}\n"
                 f"🏟️ *Partido:* {propuesta['partido']}\n"
-                f"📅 *Fecha:* {fecha_actual} | ⏰ *Hora:* {hora_actual}\n"
+                f"📅 *Fecha:* {propuesta['fecha_partido']} | ⏰ *Hora:* {propuesta['hora_partido']}\n"
                 f"───────────────────────────\n"
                 f"🧩 *COMBINACIÓN FILTRADA ({num_pasos} Pasos):*\n"
                 f"{lista_formatted}\n"
@@ -419,7 +443,7 @@ def analizar_excel():
                 f"🎯 *[SELECCIÓN DE ALTA PROBABILIDAD - PICK SIMPLE]*\n"
                 f"🏆 *Jornada:* {propuesta['jornada']}\n"
                 f"🏟️ *Partido:* {propuesta['partido']}\n"
-                f"📅 *Fecha:* {fecha_actual} | ⏰ *Hora:* {hora_actual}\n"
+                f"📅 *Fecha:* {propuesta['fecha_partido']} | ⏰ *Hora:* {propuesta['hora_partido']}\n"
                 f"───────────────────────────\n"
                 f"📌 *Mercado:* {pick['familia']}\n"
                 f"👉 *{pick['texto']}*\n"
