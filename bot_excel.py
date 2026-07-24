@@ -5,6 +5,8 @@ import unicodedata
 import pandas as pd
 import requests
 import urllib.parse
+from datetime import datetime
+import pytz
 from thefuzz import fuzz
 
 # ==========================================
@@ -18,6 +20,18 @@ PROBABILIDAD_MINIMA_FILTRO = 88.0
 MAX_ALERTAS_POR_JORNADA = 3
 MAX_PASOS_BETBUILDER = 3
 ARCHIVO_HISTORIAL = "alertas_enviadas.txt"
+
+# Zona horaria oficial: Lima, Perú
+ZONA_HORARIA_LIMA = pytz.timezone("America/Lima")
+
+
+# ==========================================
+# MÓDULO: FECHA Y HORA OFICIAL
+# ==========================================
+def obtener_fecha_hora_actual():
+    """Retorna la fecha y hora actual sincronizada con la zona horaria de Lima, Perú."""
+    ahora_lima = datetime.now(ZONA_HORARIA_LIMA)
+    return ahora_lima.strftime("%d/%m/%Y"), ahora_lima.strftime("%H:%M:%S")
 
 
 # ==========================================
@@ -378,6 +392,9 @@ def analizar_excel():
         print("[INFO] No hay propuestas nuevas para notificar.")
         return
 
+    # Obtener fecha y hora oficial actual de Lima
+    fecha_actual, hora_actual = obtener_fecha_hora_actual()
+
     for propuesta in top_selecciones:
         if propuesta["tipo"] == "BETBUILDER":
             num_pasos = len(propuesta['picks'])
@@ -386,6 +403,7 @@ def analizar_excel():
                 f"🎯 *[SELECCIÓN DE ALTA PROBABILIDAD - BETBUILDER]*\n"
                 f"🏆 *Jornada:* {propuesta['jornada']}\n"
                 f"🏟️ *Partido:* {propuesta['partido']}\n"
+                f"📅 *Fecha:* {fecha_actual} | ⏰ *Hora:* {hora_actual}\n"
                 f"───────────────────────────\n"
                 f"🧩 *COMBINACIÓN FILTRADA ({num_pasos} Pasos):*\n"
                 f"{lista_formatted}\n"
@@ -401,6 +419,7 @@ def analizar_excel():
                 f"🎯 *[SELECCIÓN DE ALTA PROBABILIDAD - PICK SIMPLE]*\n"
                 f"🏆 *Jornada:* {propuesta['jornada']}\n"
                 f"🏟️ *Partido:* {propuesta['partido']}\n"
+                f"📅 *Fecha:* {fecha_actual} | ⏰ *Hora:* {hora_actual}\n"
                 f"───────────────────────────\n"
                 f"📌 *Mercado:* {pick['familia']}\n"
                 f"👉 *{pick['texto']}*\n"
