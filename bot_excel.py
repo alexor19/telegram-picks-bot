@@ -18,7 +18,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 CUOTA_PISO_BETANO = 1.70  # Umbral mínimo de referencia opcional
 PROBABILIDAD_MINIMA_FILTRO = 88.0
 MAX_ALERTAS_POR_JORNADA = 3
-MAX_PASOS_BETBUILDER = 3
+# Se deshabilitan temporalmente los betbuilders por solicitud del usuario; 
+# todo pronóstico emitido será estrictamente un pick simple.
+MAX_PASOS_BETBUILDER = 1 
 ARCHIVO_HISTORIAL = "alertas_enviadas.txt"
 
 # Zona horaria oficial: Lima, Perú
@@ -55,12 +57,12 @@ def obtener_fecha_hora_partido(event_id):
 
 
 # ==========================================
-# MÓDULO: CONSULTA INVISIBLE Y ESTIMACIÓN BETBUILDER (BETANO PERÚ)
+# MÓDULO: CONSULTA INVISIBLE DE CUOTAS (BETANO PERÚ)
 # ==========================================
 def obtener_cuota_individual_mercado(local, tipo_mercado, detalle_pick=""):
     """
     Busca de manera específica la cuota individual de un mercado o selección 
-    dentro de la API de Betano Perú para construir estimaciones precisas.
+    dentro de la API de Betano Perú para asegurar precisión en los picks simples.
     """
     url_api_betano = f"https://www.betano.pe/api/results/search/?q={urllib.parse.quote(local)}"
     headers = {
@@ -99,57 +101,6 @@ def obtener_cuota_individual_mercado(local, tipo_mercado, detalle_pick=""):
         print(f"[EXCEPCIÓN CUOTA INDIVIDUAL] {e}")
     
     return 1.35  # Valor base conservador de respaldo si la cuota exacta no está en el índice rápido
-
-
-def obtener_cuotas_betano_invisible(local, visita):
-    """
-    Consulta mediante ingeniería inversa de red el endpoint interno de Betano Perú 
-    para extraer la cuota real y viva de los mercados disponibles sin usar valores fijos engañosos.
-    """
-    url_api_betano = f"https://www.betano.pe/api/results/search/?q={urllib.parse.quote(local)}"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://www.betano.pe/",
-        "X-Requested-With": "XMLHttpRequest",
-        "Accept": "application/json"
-    }
-    
-    cuota_extraida = "No disponible"
-    
-    try:
-        response = requests.get(url_api_betano, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            blocks = data.get("data", {}).get("blocks", [])
-            for block in blocks:
-                events = block.get("events", [])
-                for ev in events:
-                    participants = ev.get("participants", [])
-                    nombres_part = [normalizar_texto(p.get("name", "")) for p in participants]
-                    
-                    if any(normalizar_texto(local) in n for n in nombres_part) or any(normalizar_texto(visita) in n for n in nombres_part):
-                        markets = ev.get("markets", [])
-                        for market in markets:
-                            market_name = normalizar_texto(market.get("name", ""))
-                            selections = market.get("selections", [])
-                            for sel in selections:
-                                sel_name = normalizar_texto(sel.get("name", ""))
-                                price = sel.get("price")
-                                
-                                if price and ("1.5" in market_name or "1.5" in sel_name or "over" in sel_name):
-                                    cuota_extraida = str(price)
-                                    break
-                            if cuota_extraida != "No disponible":
-                                break
-                    if cuota_extraida != "No disponible":
-                        break
-                if cuota_extraida != "No disponible":
-                    break
-    except Exception as e:
-        print(f"[EXCEPCIÓN BETANO INVISIBLE] {e}")
-    
-    return cuota_extraida
 
 
 # ==========================================
@@ -465,67 +416,12 @@ def analizar_excel():
             print(f"[OMITIDO] Se descarta {local} vs {visita} por: {motivo}")
             continue
 
-        # FILTRAR FAMILIAS PARA BETBUILDER: MÁXIMO UN SOLO MERCADO DE JUGADORES
-        familias_validas_bb = []
-        contador_jugadores = 0
-        for item in sorted(familias_seleccionadas, key=lambda x: x["score"], reverse=True):
-            es_mercado_jugador = item["familia"] in ["Remates Jugador", "Jugador Gol/Asistencia"]
-            if es_mercado_jugador:
-                if contador_jugadores < 1:
-                    familias_validas_bb.append(item)
-                    contador_jugadores += 1
-            else:
-                familias_validas_bb.append(item)
+        # FILTRAR OPCIONES: EXCLUSIVAMENTE PICKS SIMPLES (SIN BETBUILDERS)
+        familias_validas = sorted(familias_seleccionadas, key=lambda x: x["score"], reverse=True)
 
-        # ALTERNANCIA INTELIGENTE ENTRE SIMPLE Y BETBUILDER
-        # Si hay suficientes opciones calificadas, decidimos dinámicamente si crear Betbuilder o Simple
-        if len(familias_validas_bb) >= 2:
-            # Seleccionamos hasta MAX_PASOS_BETBUILDER para la combinada
-            picks_finales = familias_validas_bb[:MAX_PASOS_BETBUILDER]
-            
-            cuotas_componentes = []
-            for pick in picks_finales:
-                c_ind = obtener_cuota_individual_mercado(local, pick["familia"], pick["texto"])
-                cuotas_componentes.append(c_ind)
-            
-            producto_neto = 1.0
-            for c in cuotas_componentes:
-                producto_neto *= c
-            cuota_viva_real = f"{producto_neto * 0.94:.2f} (Estimada Betbuilder)"
-            
-            score_promedio = sum(c['score'] for c in picks_finales) / len(picks_finales)
-            
-            # Si solo quedó 1 paso útil tras el filtro o por decisión analítica, emitimos Simple, de lo contrario Betbuilder
-            if len(picks_finales) == 1:
-                pick = picks_finales[0]
-                c_ind = obtener_cuota_individual_mercado(local, pick["familia"], pick["texto"])
-                todas_las_propuestas.append({
-                    "alerta_id": alerta_id,
-                    "tipo": "SIMPLE",
-                    "partido": f"{local} vs. {visita}",
-                    "jornada": jornada_txt,
-                    "fecha_partido": obtener_fecha_hora_partido(event_id)[0] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%d/%m/%Y"),
-                    "hora_partido": obtener_fecha_hora_partido(event_id)[1] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%H:%M:%S"),
-                    "pick": pick,
-                    "score": pick["score"],
-                    "sustento": pick["razon"],
-                    "cuota": f"{c_ind:.2f}"
-                })
-            else:
-                todas_las_propuestas.append({
-                    "alerta_id": alerta_id,
-                    "tipo": "BETBUILDER",
-                    "partido": f"{local} vs. {visita}",
-                    "jornada": jornada_txt,
-                    "fecha_partido": obtener_fecha_hora_partido(event_id)[0] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%d/%m/%Y"),
-                    "hora_partido": obtener_fecha_hora_partido(event_id)[1] if event_id else datetime.now(ZONA_HORARIA_LIMA).strftime("%H:%M:%S"),
-                    "picks": picks_finales,
-                    "score": score_promedio,
-                    "sustento": picks_finales[0]["razon"],
-                    "cuota": cuota_viva_real
-                })
-        elif len(familias_validas_bb) == 1:
-            pick = familias_validas_bb[0]
+        if familias_validas:
+            # Seleccionamos siempre el mejor pick individual disponible para el partido
+            pick = familias_validas[0]
             c_ind = obtener_cuota_individual_mercado(local, pick["familia"], pick["texto"])
             cuota_viva_real = f"{c_ind:.2f}"
             
@@ -552,39 +448,21 @@ def analizar_excel():
         return
 
     for propuesta in top_selecciones:
-        if propuesta["tipo"] == "BETBUILDER":
-            num_pasos = len(propuesta['picks'])
-            lista_formatted = "\n".join([f"    • {item['texto']}" for item in propuesta["picks"]])
-            mensaje = (
-                f"🎯 *[SELECCIÓN DE ALTA PROBABILIDAD - BETBUILDER]*\n"
-                f"🏆 *Jornada:* {propuesta['jornada']}\n"
-                f"🏟️ *Partido:* {propuesta['partido']}\n"
-                f"📅 *Fecha:* {propuesta['fecha_partido']} | ⏰ *Hora:* {propuesta['hora_partido']}\n"
-                f"───────────────────────────\n"
-                f"🧩 *COMBINADA FILTRADA ({num_pasos} Pasos - Máx 1 Jugador):*\n"
-                f"{lista_formatted}\n"
-                f"───────────────────────────\n"
-                f"📊 *Sustento Principal:* {propuesta['sustento']}\n"
-                f"🔥 *Nivel de Confianza:* {propuesta['score']:.1f}%\n"
-                f"💰 *Cuota Betano:* {propuesta['cuota']}\n"
-                f"🛡️ *Perfil:* Value Bettor Conservador-Activo"
-            )
-        else:
-            pick = propuesta["pick"]
-            mensaje = (
-                f"🎯 *[SELECCIÓN DE ALTA PROBABILIDAD - PICK SIMPLE]*\n"
-                f"🏆 *Jornada:* {propuesta['jornada']}\n"
-                f"🏟️ *Partido:* {propuesta['partido']}\n"
-                f"📅 *Fecha:* {propuesta['fecha_partido']} | ⏰ *Hora:* {propuesta['hora_partido']}\n"
-                f"───────────────────────────\n"
-                f"📌 *Mercado:* {pick['familia']}\n"
-                f"👉 *{pick['texto']}*\n"
-                f"───────────────────────────\n"
-                f"📊 *Sustento Estadístico:* {pick['razon']}\n"
-                f"🔥 *Nivel de Confianza:* {propuesta['score']:.1f}%\n"
-                f"💰 *Cuota Betano:* {propuesta['cuota']}\n"
-                f"🛡️ *Perfil:* Value Bettor Conservador-Activo"
-            )
+        pick = propuesta["pick"]
+        mensaje = (
+            f"🎯 *[SELECCIÓN DE ALTA PROBABILIDAD - PICK SIMPLE]*\n"
+            f"🏆 *Jornada:* {propuesta['jornada']}\n"
+            f"🏟️ *Partido:* {propuesta['partido']}\n"
+            f"📅 *Fecha:* {propuesta['fecha_partido']} | ⏰ *Hora:* {propuesta['hora_partido']}\n"
+            f"───────────────────────────\n"
+            f"📌 *Mercado:* {pick['familia']}\n"
+            f"👉 *{pick['texto']}*\n"
+            f"───────────────────────────\n"
+            f"📊 *Sustento Estadístico:* {pick['razon']}\n"
+            f"🔥 *Nivel de Confianza:* {propuesta['score']:.1f}%\n"
+            f"💰 *Cuota Betano:* {propuesta['cuota']}\n"
+            f"🛡️ *Perfil:* Value Bettor Conservador-Activo"
+        )
         enviar_telegram(mensaje)
         registrar_alerta(propuesta["alerta_id"])
 
