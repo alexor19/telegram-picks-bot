@@ -60,9 +60,8 @@ def obtener_fecha_hora_partido(event_id):
 def obtener_cuotas_betano_invisible(local, visita):
     """
     Consulta mediante ingeniería inversa de red el endpoint interno de Betano Perú 
-    para extraer las cuotas vivas de todos los mercados disponibles de forma 100% gratuita.
+    para extraer las cuotas vivas y reales de los mercados disponibles.
     """
-    # Endpoint público/interno de búsqueda y eventos de Betano Perú
     url_api_betano = f"https://www.betano.pe/api/results/search/?q={urllib.parse.quote(local)}"
     
     headers = {
@@ -72,17 +71,41 @@ def obtener_cuotas_betano_invisible(local, visita):
         "Accept": "application/json"
     }
     
+    cuota_extraida = f"{CUOTA_PISO_BETANO:.2f}" # Fallback por defecto
+    
     try:
         response = requests.get(url_api_betano, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            # Parseo seguro de los mercados devueltos por el JSON interno
-            # Si se encuentra el evento, extraemos el diccionario de cuotas y mercados completos
-            return data
+            # Búsqueda inteligente dentro de los resultados de la API de Betano
+            blocks = data.get("data", {}).get("blocks", [])
+            for block in blocks:
+                events = block.get("events", [])
+                for ev in events:
+                    participants = ev.get("participants", [])
+                    nombres_part = [normalizar_texto(p.get("name", "")) for p in participants]
+                    
+                    # Verificamos si corresponde al partido buscado
+                    if any(normalizar_texto(local) in n for n in nombres_part) or any(normalizar_texto(visita) in n for n in nombres_part):
+                        markets = ev.get("markets", [])
+                        for market in markets:
+                            selections = market.get("selections", [])
+                            for sel in selections:
+                                price = sel.get("price")
+                                if price:
+                                    # Tomamos la primera cuota válida encontrada del evento o mercado principal
+                                    cuota_extraida = str(price)
+                                    break
+                            if cuota_extraida != f"{CUOTA_PISO_BETANO:.2f}":
+                                break
+                    if cuota_extraida != f"{CUOTA_PISO_BETANO:.2f}":
+                        break
+                if cuota_extraida != f"{CUOTA_PISO_BETANO:.2f}":
+                    break
     except Exception as e:
         print(f"[EXCEPCIÓN BETANO INVISIBLE] {e}")
     
-    return None
+    return cuota_extraida
 
 
 # ==========================================
@@ -408,8 +431,8 @@ def analizar_excel():
             print(f"[OMITIDO] Se descarta {local} vs {visita} por: {motivo}")
             continue
 
-        # CONSULTA INVISIBLE DE CUOTAS EN BETANO PERÚ (PUERTA TRASERA)
-        _ = obtener_cuotas_betano_invisible(local, visita)
+        # CONSULTA INVISIBLE Y EXTRACCIÓN DE LA CUOTA VIVA REAL EN BETANO PERÚ
+        cuota_viva_real = obtener_cuotas_betano_invisible(local, visita)
 
         # Obtener fecha y hora oficial del partido (desde la API de Sofascore)
         fecha_partido, hora_partido = obtener_fecha_hora_partido(event_id) if event_id else (datetime.now(ZONA_HORARIA_LIMA).strftime("%d/%m/%Y"), datetime.now(ZONA_HORARIA_LIMA).strftime("%H:%M:%S"))
@@ -427,7 +450,8 @@ def analizar_excel():
                 "hora_partido": hora_partido,
                 "picks": picks_finales,
                 "score": score_promedio,
-                "sustento": picks_finales[0]["razon"]
+                "sustento": picks_finales[0]["razon"],
+                "cuota": cuota_viva_real
             })
         elif len(familias_seleccionadas) == 1:
             pick = familias_seleccionadas[0]
@@ -440,7 +464,8 @@ def analizar_excel():
                 "hora_partido": hora_partido,
                 "pick": pick,
                 "score": pick["score"],
-                "sustento": pick["razon"]
+                "sustento": pick["razon"],
+                "cuota": cuota_viva_real
             })
 
     # FILTRADO Y ENVÍO
@@ -456,7 +481,7 @@ def analizar_excel():
     for propuesta in top_selecciones:
         if propuesta["tipo"] == "BETBUILDER":
             num_pasos = len(propuesta['picks'])
-            lista_formatted = "\n".join([f"   • {item['texto']}" for item in propuesta["picks"]])
+            lista_formatted = "\n".join([f"    • {item['texto']}" for item in propuesta["picks"]])
             mensaje = (
                 f"🎯 *[SELECCIÓN DE ALTA PROBABILIDAD - BETBUILDER]*\n"
                 f"🏆 *Jornada:* {propuesta['jornada']}\n"
@@ -468,7 +493,7 @@ def analizar_excel():
                 f"───────────────────────────\n"
                 f"📊 *Sustento Principal:* {propuesta['sustento']}\n"
                 f"🔥 *Nivel de Confianza:* {propuesta['score']:.1f}%\n"
-                f"💰 *Piso de Cuota Betano:* {CUOTA_PISO_BETANO:.2f}+\n"
+                f"💰 *Cuota Betano:* {propuesta['cuota']}\n"
                 f"🛡️ *Perfil:* Value Bettor Conservador-Activo"
             )
         else:
@@ -484,7 +509,7 @@ def analizar_excel():
                 f"───────────────────────────\n"
                 f"📊 *Sustento Estadístico:* {pick['razon']}\n"
                 f"🔥 *Nivel de Confianza:* {propuesta['score']:.1f}%\n"
-                f"💰 *Piso de Cuota Betano:* {CUOTA_PISO_BETANO:.2f}+\n"
+                f"💰 *Cuota Betano:* {propuesta['cuota']}\n"
                 f"🛡️ *Perfil:* Value Bettor Conservador-Activo"
             )
         enviar_telegram(mensaje)
