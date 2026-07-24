@@ -15,7 +15,7 @@ from thefuzz import fuzz
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-CUOTA_PISO_BETANO = 1.70
+CUOTA_PISO_BETANO = 1.70  # Umbral mínimo de referencia opcional
 PROBABILIDAD_MINIMA_FILTRO = 88.0
 MAX_ALERTAS_POR_JORNADA = 3
 MAX_PASOS_BETBUILDER = 3
@@ -60,7 +60,7 @@ def obtener_fecha_hora_partido(event_id):
 def obtener_cuotas_betano_invisible(local, visita):
     """
     Consulta mediante ingeniería inversa de red el endpoint interno de Betano Perú 
-    para extraer las cuotas vivas y reales de los mercados disponibles.
+    para extraer la cuota real y viva de los mercados disponibles sin usar valores fijos engañosos.
     """
     url_api_betano = f"https://www.betano.pe/api/results/search/?q={urllib.parse.quote(local)}"
     
@@ -71,13 +71,12 @@ def obtener_cuotas_betano_invisible(local, visita):
         "Accept": "application/json"
     }
     
-    cuota_extraida = f"{CUOTA_PISO_BETANO:.2f}" # Fallback por defecto
+    cuota_extraida = "No disponible"
     
     try:
         response = requests.get(url_api_betano, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            # Búsqueda inteligente dentro de los resultados de la API de Betano
             blocks = data.get("data", {}).get("blocks", [])
             for block in blocks:
                 events = block.get("events", [])
@@ -89,18 +88,21 @@ def obtener_cuotas_betano_invisible(local, visita):
                     if any(normalizar_texto(local) in n for n in nombres_part) or any(normalizar_texto(visita) in n for n in nombres_part):
                         markets = ev.get("markets", [])
                         for market in markets:
+                            market_name = normalizar_texto(market.get("name", ""))
                             selections = market.get("selections", [])
                             for sel in selections:
+                                sel_name = normalizar_texto(sel.get("name", ""))
                                 price = sel.get("price")
-                                if price:
-                                    # Tomamos la primera cuota válida encontrada del evento o mercado principal
+                                
+                                # Buscamos específicamente cuotas del mercado Over 1.5 o líneas similares
+                                if price and ("1.5" in market_name or "1.5" in sel_name or "over" in sel_name):
                                     cuota_extraida = str(price)
                                     break
-                            if cuota_extraida != f"{CUOTA_PISO_BETANO:.2f}":
+                            if cuota_extraida != "No disponible":
                                 break
-                    if cuota_extraida != f"{CUOTA_PISO_BETANO:.2f}":
+                    if cuota_extraida != "No disponible":
                         break
-                if cuota_extraida != f"{CUOTA_PISO_BETANO:.2f}":
+                if cuota_extraida != "No disponible":
                     break
     except Exception as e:
         print(f"[EXCEPCIÓN BETANO INVISIBLE] {e}")
@@ -308,7 +310,6 @@ def analizar_excel():
         jornada = fila.get("Jornada", "N/A")
         jornada_txt = int(jornada) if pd.notna(jornada) and isinstance(jornada, (int, float)) else str(jornada)
 
-        # GENERAR ID ÚNICO PARA REVISAR EN HISTORIAL
         alerta_id = f"J{jornada_txt}_{normalizar_texto(local)}_vs_{normalizar_texto(visita)}"
         
         if alerta_id in historial:
@@ -321,11 +322,9 @@ def analizar_excel():
         if len(hist_local) < 1 or len(hist_visita) < 1:
             continue
 
-        # Promedios
         goles_L = [p["Goles L"] if p["Local"] == local else p["Goles V"] for _, p in hist_local.iterrows()]
         goles_V = [p["Goles L"] if p["Local"] == visita else p["Goles V"] for _, p in hist_visita.iterrows()]
         remates_L = [p.get("Remates Arco L", 0) if p["Local"] == local else p.get("Remates Arco V", 0) for _, p in hist_local.iterrows()]
-        remates_V = [p.get("Remates Arco L", 0) if p["Local"] == visita else p.get("Remates Arco V", 0) for _, p in hist_visita.iterrows()]
         corners_L = [p.get("Corners L", 0) if p["Local"] == local else p.get("Corners V", 0) for _, p in hist_local.iterrows()]
         corners_V = [p.get("Corners L", 0) if p["Local"] == visita else p.get("Corners V", 0) for _, p in hist_visita.iterrows()]
 
@@ -338,7 +337,6 @@ def analizar_excel():
         familias_seleccionadas = []
         jugadores_a_validar = []
 
-        # FAMILIA 1: 1X2
         if prom_goles_L >= 2.3 and prom_goles_V <= 0.7:
             familias_seleccionadas.append({
                 "familia": "Resultado Final",
@@ -347,7 +345,6 @@ def analizar_excel():
                 "score": 89.5
             })
 
-        # FAMILIA 2: GOLES TOTALES
         if (prom_goles_L + prom_goles_V) >= 2.2:
             familias_seleccionadas.append({
                 "familia": "Goles Totales",
@@ -356,7 +353,6 @@ def analizar_excel():
                 "score": 90.0
             })
 
-        # FAMILIA 3: GOLES EQUIPO
         tiene_1x2 = any(item["familia"] == "Resultado Final" for item in familias_seleccionadas)
         if not tiene_1x2 and prom_goles_L >= 1.5:
             familias_seleccionadas.append({
@@ -366,7 +362,6 @@ def analizar_excel():
                 "score": 88.5
             })
 
-        # FAMILIA 4: CÓRNERS
         if (prom_corners_L + prom_corners_V) >= 8.5:
             familias_seleccionadas.append({
                 "familia": "Córners",
@@ -382,7 +377,6 @@ def analizar_excel():
                 "score": 88.0
             })
 
-        # FAMILIA 5: REMATES EQUIPO
         if prom_remates_L >= 4.5:
             familias_seleccionadas.append({
                 "familia": "Remates Equipo",
@@ -391,7 +385,6 @@ def analizar_excel():
                 "score": 88.5
             })
 
-        # FAMILIAS 6 Y 7: JUGADORES
         if not df_jugadores.empty and "Equipo" in df_jugadores.columns:
             jugadores_partido = df_jugadores[df_jugadores["Equipo"].isin([local, visita])].copy()
             
@@ -425,16 +418,12 @@ def analizar_excel():
 
         jugadores_a_validar = list(set(jugadores_a_validar))
 
-        # VALIDACIÓN EN SOFASCORE Y OBTENCIÓN DE EVENT_ID
         es_valido, motivo, event_id = validar_titulares_sofascore(local, visita, jugadores_a_validar)
         if not es_valido:
             print(f"[OMITIDO] Se descarta {local} vs {visita} por: {motivo}")
             continue
 
-        # CONSULTA INVISIBLE Y EXTRACCIÓN DE LA CUOTA VIVA REAL EN BETANO PERÚ
         cuota_viva_real = obtener_cuotas_betano_invisible(local, visita)
-
-        # Obtener fecha y hora oficial del partido (desde la API de Sofascore)
         fecha_partido, hora_partido = obtener_fecha_hora_partido(event_id) if event_id else (datetime.now(ZONA_HORARIA_LIMA).strftime("%d/%m/%Y"), datetime.now(ZONA_HORARIA_LIMA).strftime("%H:%M:%S"))
 
         if len(familias_seleccionadas) >= 2:
@@ -468,7 +457,6 @@ def analizar_excel():
                 "cuota": cuota_viva_real
             })
 
-    # FILTRADO Y ENVÍO
     propuestas_filtradas = [p for p in todas_las_propuestas if p["score"] >= PROBABILIDAD_MINIMA_FILTRO]
     propuestas_filtradas.sort(key=lambda x: x["score"], reverse=True)
 
