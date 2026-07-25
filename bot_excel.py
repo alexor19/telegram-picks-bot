@@ -19,6 +19,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 PROBABILIDAD_MINIMA_FILTRO = 60.0
 PROBABILIDAD_MAXIMA_FILTRO = 85.0
 
+# Filtro de valor y máxima calidad (evita saturación y prioriza lo importante)
 MAX_ALERTAS_POR_JORNADA = 3
 MAX_PASOS_BETBUILDER = 2  
 ARCHIVO_HISTORIAL = "alertas_enviadas.txt"
@@ -228,167 +229,174 @@ def calcular_promedio(lista):
 
 def analizar_excel():
     historial = cargar_historial()
-    archivos = glob.glob("*.xlsx")
     
-    if not archivos:
-        return
-
-    excel_path = archivos[0]
-    try:
-        xls = pd.ExcelFile(excel_path)
-        df_partidos = pd.read_excel(xls, sheet_name="Partidos")
-        df_jugadores = pd.DataFrame(columns=["Jugador", "Equipo", "Remates al Arco", "Goles", "Asistencias"])
-        if "Estadísticas Jugadores" in xls.sheet_names:
-            df_jugadores = pd.read_excel(xls, sheet_name="Estadísticas Jugadores")
-    except Exception as e:
-        return
-
-    df_partidos = df_partidos.dropna(subset=["Local", "Visitante"])
-    partidos_jugados = df_partidos.dropna(subset=["Goles L", "Goles V"]).copy()
-    partidos_pendientes = df_partidos[df_partidos["Goles L"].isna()].copy()
-
-    if partidos_pendientes.empty:
+    # SOPORTE MULTI-EXCEL: Busca todos los archivos .xlsx en el repositorio (diferentes ligas)
+    archivos_excel = glob.glob("*.xlsx")
+    if not archivos_excel:
+        print("[INFO] No se encontraron archivos Excel en el repositorio.")
         return
 
     todas_las_propuestas = []
 
-    for _, fila in partidos_pendientes.iterrows():
-        local = str(fila["Local"]).strip()
-        visita = str(fila["Visitante"]).strip()
-        jornada = fila.get("Jornada", "N/A")
-        jornada_txt = int(jornada) if pd.notna(jornada) and isinstance(jornada, (int, float)) else str(jornada)
-
-        alerta_id = f"J{jornada_txt}_{normalizar_texto(local)}_vs_{normalizar_texto(visita)}"
-        if alerta_id in historial:
+    # Procesar cada archivo de liga de manera independiente
+    for excel_path in archivos_excel:
+        try:
+            xls = pd.ExcelFile(excel_path)
+            if "Partidos" not in xls.sheet_names:
+                continue
+            df_partidos = pd.read_excel(xls, sheet_name="Partidos")
+            df_jugadores = pd.DataFrame(columns=["Jugador", "Equipo", "Remates al Arco", "Goles", "Asistencias"])
+            if "Estadísticas Jugadores" in xls.sheet_names:
+                df_jugadores = pd.read_excel(xls, sheet_name="Estadísticas Jugadores")
+        except Exception as e:
+            print(f"[ERROR LEYENDO EXCEL {excel_path}] {e}")
             continue
 
-        # Historial de últimos partidos (últimos 3)
-        hist_local = partidos_jugados[(partidos_jugados["Local"] == local) | (partidos_jugados["Visitante"] == local)].tail(3)
-        hist_visita = partidos_jugados[(partidos_jugados["Local"] == visita) | (partidos_jugados["Visitante"] == visita)].tail(3)
+        df_partidos = df_partidos.dropna(subset=["Local", "Visitante"])
+        partidos_jugados = df_partidos.dropna(subset=["Goles L", "Goles V"]).copy()
+        partidos_pendientes = df_partidos[df_partidos["Goles L"].isna()].copy()
 
-        if len(hist_local) < 1 or len(hist_visita) < 1:
+        if partidos_pendientes.empty:
             continue
 
-        goles_L = [p["Goles L"] if p["Local"] == local else p["Goles V"] for _, p in hist_local.iterrows()]
-        goles_V = [p["Goles L"] if p["Local"] == visita else p["Goles V"] for _, p in hist_visita.iterrows()]
-        remates_L = [p.get("Remates Arco L", 0) if p["Local"] == local else p.get("Remates Arco V", 0) for _, p in hist_local.iterrows()]
-        corners_L = [p.get("Corners L", 0) if p["Local"] == local else p.get("Corners V", 0) for _, p in hist_local.iterrows()]
-        corners_V = [p.get("Corners L", 0) if p["Local"] == visita else p.get("Corners V", 0) for _, p in hist_visita.iterrows()]
+        for _, fila in partidos_pendientes.iterrows():
+            local = str(fila["Local"]).strip()
+            visita = str(fila["Visitante"]).strip()
+            jornada = fila.get("Jornada", "N/A")
+            jornada_txt = int(jornada) if pd.notna(jornada) and isinstance(jornada, (int, float)) else str(jornada)
 
-        prom_goles_L = calcular_promedio(goles_L)
-        prom_goles_V = calcular_promedio(goles_V)
-        prom_remates_L = calcular_promedio(remates_L)
-        prom_corners_L = calcular_promedio(corners_L)
-        prom_corners_V = calcular_promedio(corners_V)
+            alerta_id = f"{os.path.basename(excel_path)}_J{jornada_txt}_{normalizar_texto(local)}_vs_{normalizar_texto(visita)}"
+            if alerta_id in historial:
+                continue
 
-        familias_seleccionadas = []
-        jugadores_a_validar = []
+            # Historial de últimos partidos (últimos 3)
+            hist_local = partidos_jugados[(partidos_jugados["Local"] == local) | (partidos_jugados["Visitante"] == local)].tail(3)
+            hist_visita = partidos_jugados[(partidos_jugados["Local"] == visita) | (partidos_jugados["Visitante"] == visita)].tail(3)
 
-        # Análisis flexible adaptado al nuevo rango de probabilidad (60% - 85%)
-        if prom_goles_L >= 1.5:
-            familias_seleccionadas.append({
-                "tipo": "SIMPLE",
-                "familia": "Resultado Final / Doble Oportunidad", 
-                "texto": f"Doble Oportunidad: {local} o Empate (1X)", 
-                "razon": f"{local} mantiene solidez en casa con {prom_goles_L:.1f} goles promedio.", 
-                "score": 78.5
-            })
+            if len(hist_local) < 1 or len(hist_visita) < 1:
+                continue
 
-        if (prom_goles_L + prom_goles_V) >= 1.8:
-            familias_seleccionadas.append({
-                "tipo": "SIMPLE",
-                "familia": "Goles Totales", 
-                "texto": "Over 1.5 Goles Totales en el Partido", 
-                "razon": f"Promedio conjunto de {prom_goles_L + prom_goles_V:.1f} goles por encuentro.", 
-                "score": 82.0
-            })
+            goles_L = [p["Goles L"] if p["Local"] == local else p["Goles V"] for _, p in hist_local.iterrows()]
+            goles_V = [p["Goles L"] if p["Local"] == visita else p["Goles V"] for _, p in hist_visita.iterrows()]
+            remates_L = [p.get("Remates Arco L", 0) if p["Local"] == local else p.get("Remates Arco V", 0) for _, p in hist_local.iterrows()]
+            corners_L = [p.get("Corners L", 0) if p["Local"] == local else p.get("Corners V", 0) for _, p in hist_local.iterrows()]
+            corners_V = [p.get("Corners L", 0) if p["Local"] == visita else p.get("Corners V", 0) for _, p in hist_visita.iterrows()]
 
-        if (prom_corners_L + prom_corners_V) >= 7.5:
-            familias_seleccionadas.append({
-                "tipo": "SIMPLE",
-                "familia": "Córners Totales", 
-                "texto": "Over 6.5 Córners Totales del Partido", 
-                "razon": f"Dinámica ofensiva genera un promedio de {prom_corners_L + prom_corners_V:.1f} saques de esquina.", 
-                "score": 75.0
-            })
+            prom_goles_L = calcular_promedio(goles_L)
+            prom_goles_V = calcular_promedio(goles_V)
+            prom_remates_L = calcular_promedio(remates_L)
+            prom_corners_L = calcular_promedio(corners_L)
+            prom_corners_V = calcular_promedio(corners_V)
 
-        # Evaluación de estadísticas de jugadores (Goles, Asistencias, Remates al Arco)
-        if not df_jugadores.empty and "Equipo" in df_jugadores.columns:
-            jugadores_partido = df_jugadores[df_jugadores["Equipo"].isin([local, visita])].copy()
-            if not jugadores_partido.empty:
-                if "Remates al Arco" in jugadores_partido.columns:
-                    rematadores = jugadores_partido[jugadores_partido["Remates al Arco"] >= 1]
-                    if not rematadores.empty:
-                        top_r = rematadores.sort_values(by="Remates al Arco", ascending=False).iloc[0]
-                        familias_seleccionadas.append({
-                            "tipo": "SIMPLE",
-                            "familia": "Remates de Jugador", 
-                            "texto": f"{top_r['Jugador']} ➔ Over 0.5 Remates a Puerta", 
-                            "razon": f"Alta frecuencia de intentos directos previos.", 
-                            "score": 79.0
-                        })
-                        jugadores_a_validar.append(str(top_r['Jugador']))
+            familias_seleccionadas = []
+            jugadores_a_validar = []
 
-        # Criterio inteligente para Betbuilder (si hay al menos 2 condiciones sólidas y respetamos MAX_PASOS_BETBUILDER)
-        if len(familias_seleccionadas) >= 2 and MAX_PASOS_BETBUILDER >= 2:
-            p1 = familias_seleccionadas[0]
-            p2 = familias_seleccionadas[1]
-            familias_seleccionadas.append({
-                "tipo": "BETBUILDER",
-                "familia": "Betbuilder Combinado (2 Pasos)",
-                "texto": f"1) {p1['texto']}\n    2) {p2['texto']}",
-                "razon": f"Confluencia de factores tácticos: {p1['razon']} + {p2['razon']}",
-                "score": 73.0  # Ligero ajuste de probabilidad por combinada
-            })
+            # Análisis flexible adaptado al nuevo rango de probabilidad (60% - 85%)
+            if prom_goles_L >= 1.5:
+                familias_seleccionadas.append({
+                    "tipo": "SIMPLE",
+                    "familia": "Resultado Final / Doble Oportunidad", 
+                    "texto": f"Doble Oportunidad: {local} o Empate (1X)", 
+                    "razon": f"{local} mantiene solidez en casa con {prom_goles_L:.1f} goles promedio.", 
+                    "score": 78.5
+                })
 
-        jugadores_a_validar = list(set(jugadores_a_validar))
-        
-        # VALIDACIÓN DE TIMING (15-20 min antes) Y ALINEACIONES OFICIALES
-        es_momento_exacto, _, event_id = validar_timing_y_alineaciones(local, visita, jugadores_a_validar)
-        if not es_momento_exacto:
-            continue
+            if (prom_goles_L + prom_goles_V) >= 1.8:
+                familias_seleccionadas.append({
+                    "tipo": "SIMPLE",
+                    "familia": "Goles Totales", 
+                    "texto": "Over 1.5 Goles Totales en el Partido", 
+                    "razon": f"Promedio conjunto de {prom_goles_L + prom_goles_V:.1f} goles por encuentro.", 
+                    "score": 82.0
+                })
 
-        familias_validas = sorted(familias_seleccionadas, key=lambda x: x["score"], reverse=True)
-        if familias_validas:
-            pick = familias_validas[0]
+            if (prom_corners_L + prom_corners_V) >= 7.5:
+                familias_seleccionadas.append({
+                    "tipo": "SIMPLE",
+                    "familia": "Córners Totales", 
+                    "texto": "Over 6.5 Córners Totales del Partido", 
+                    "razon": f"Dinámica ofensiva genera un promedio de {prom_corners_L + prom_corners_V:.1f} saques de esquina.", 
+                    "score": 75.0
+                })
+
+            # Evaluación de estadísticas de jugadores (Goles, Asistencias, Remates al Arco)
+            if not df_jugadores.empty and "Equipo" in df_jugadores.columns:
+                jugadores_partido = df_jugadores[df_jugadores["Equipo"].isin([local, visita])].copy()
+                if not jugadores_partido.empty:
+                    if "Remates al Arco" in jugadores_partido.columns:
+                        rematadores = jugadores_partido[jugadores_partido["Remates al Arco"] >= 1]
+                        if not rematadores.empty:
+                            top_r = rematadores.sort_values(by="Remates al Arco", ascending=False).iloc[0]
+                            familias_seleccionadas.append({
+                                "tipo": "SIMPLE",
+                                "familia": "Remates de Jugador", 
+                                "texto": f"{top_r['Jugador']} ➔ Over 0.5 Remates a Puerta", 
+                                "razon": f"Alta frecuencia de intentos directos previos.", 
+                                "score": 79.0
+                            })
+                            jugadores_a_validar.append(str(top_r['Jugador']))
+
+            # Criterio inteligente para Betbuilder (si hay al menos 2 condiciones sólidas y respetamos MAX_PASOS_BETBUILDER)
+            if len(familias_seleccionadas) >= 2 and MAX_PASOS_BETBUILDER >= 2:
+                p1 = familias_seleccionadas[0]
+                p2 = familias_seleccionadas[1]
+                familias_seleccionadas.append({
+                    "tipo": "BETBUILDER",
+                    "familia": "Betbuilder Combinado (2 Pasos)",
+                    "texto": f"1) {p1['texto']}\n    2) {p2['texto']}",
+                    "razon": f"Confluencia de factores tácticos: {p1['razon']} + {p2['razon']}",
+                    "score": 73.0  # Ligero ajuste de probabilidad por combinada
+                })
+
+            jugadores_a_validar = list(set(jugadores_a_validar))
             
-            fecha_p, hora_p, estadio_p, arbitro_p, _ = obtener_detalles_partido_sofascore(event_id)
+            # VALIDACIÓN DE TIMING (15-20 min antes) Y ALINEACIONES OFICIALES
+            es_momento_exacto, _, event_id = validar_timing_y_alineaciones(local, visita, jugadores_a_validar)
+            if not es_momento_exacto:
+                continue
 
-            todas_las_propuestas.append({
-                "alerta_id": alerta_id,
-                "partido": f"{local} vs. {visita}",
-                "jornada": jornada_txt,
-                "fecha_partido": fecha_p,
-                "hora_partido": hora_p,
-                "estadio": estadio_p,
-                "arbitro": arbitro_p,
-                "pick": pick,
-                "score": pick["score"]
-            })
+            familias_validas = sorted(familias_seleccionadas, key=lambda x: x["score"], reverse=True)
+            if familias_validas:
+                pick = familias_validas[0]
+                
+                fecha_p, hora_p, estadio_p, arbitro_p, _ = obtener_detalles_partido_sofascore(event_id)
 
-    # Filtrado estricto por el nuevo rango de probabilidad
+                todas_las_propuestas.append({
+                    "alerta_id": alerta_id,
+                    "partido": f"{local} vs. {visita}",
+                    "liga_excel": os.path.basename(excel_path).replace(".xlsx", "").upper(),
+                    "jornada": jornada_txt,
+                    "fecha_partido": fecha_p,
+                    "hora_partido": hora_p,
+                    "estadio": estadio_p,
+                    "arbitro": arbitro_p,
+                    "pick": pick,
+                    "score": pick["score"]
+                })
+
+    # FILTRO DE MÁXIMA CALIDAD Y VALOR (Ordenados de mayor a menor probabilidad)
     propuestas_filtradas = [p for p in todas_las_propuestas if PROBABILIDAD_MINIMA_FILTRO <= p["score"] <= PROBABILIDAD_MAXIMA_FILTRO]
     propuestas_filtradas.sort(key=lambda x: x["score"], reverse=True)
 
+    # ENVÍO EXCLUSIVO DE LOS MEJORES (Controlando el límite para evitar sobre-apuesta)
     for propuesta in propuestas_filtradas[:MAX_ALERTAS_POR_JORNADA]:
         pick = propuesta["pick"]
         
-        # Formato de mensaje adaptado sin cuotas y con datos detallados
         mensaje = (
-            f"🎯 *[PRONÓSTICO OFICIAL - ALINEACIÓN CONFIRMADA]*\n"
-            f"🏆 *Jornada:* {propuesta['jornada']}\n"
+            f"🎯 *[PRONÓSTICO DE VALOR - ALINEACIÓN CONFIRMADA]*\n"
+            f"📂 *Liga:* {propuesta['liga_excel']} | 🏆 *Jornada:* {propuesta['jornada']}\n"
             f"🏟️ *Partido:* {propuesta['partido']}\n"
             f"📍 *Estadio:* {propuesta['estadio']}\n"
             f"⚖️ *Árbitro:* {propuesta['arbitro']}\n"
             f"📅 *Fecha:* {propuesta['fecha_partido']} | ⏰ *Hora (Lima):* {propuesta['hora_partido']}\n"
             f"───────────────────────────\n"
             f"📌 *Tipo de Pronóstico:* {pick['tipo']}\n"
-            f"📂 *Mercado:* {pick['familia']}\n"
+            f"📊 *Mercado:* {pick['familia']}\n"
             f"👉 *{pick['texto']}*\n"
             f"───────────────────────────\n"
-            f"📊 *Sustento Estadístico:* {pick['razon']}\n"
+            f"💡 *Sustento Estadístico:* {pick['razon']}\n"
             f"🔥 *Probabilidad Estimada:* {propuesta['score']:.1f}%\n"
-            f"🛡️ *Perfil:* Value Bettor Activo-Conservador"
+            f"🛡️ *Perfil:* Value Bettor Activo-Conservador (Filtro de Alto Valor)"
         )
         enviar_telegram(mensaje)
         registrar_alerta(propuesta["alerta_id"])
